@@ -1,0 +1,44 @@
+{
+  "build": {
+    "arduino": {
+      "board": "GENERIC_U031K8UX"
+    },
+    "core": "stm32",
+    "cpu": "cortex-m0plus",
+    "extra_flags": "-DSTM32U0 -DSTM32U0xx -DSTM32U031xx",
+    "f_cpu": "56000000L",
+    "framework_extra_flags": {
+      "arduino": "-D__CORTEX_SC=0"
+    },
+    "mcu": "stm32u031k8u6",
+    "product_line": "STM32U031xx",
+    "variant": "STM32U0xx/U031K(4-6-8)U"
+  },
+  "debug": {
+    "default_tools": [
+      "stlink"
+    ],
+    "jlink_device": "STM32U031K8",
+    "openocd_target": "stm32u0x",
+    "svd_path": "STM32U031.svd"
+  },
+  "frameworks": [
+    "arduino",
+    "cmsis"
+  ],
+  "name": "STM32U031K8 (12k RAM. 64k Flash)",
+  "upload": {
+    "maximum_ram_size": 12288,
+    "maximum_size": 65536,
+    "protocol": "stlink",
+    "protocols": [
+      "blackmagic",
+      "cmsis-dap",
+      "jlink",
+      "serial",
+      "stlink"
+    ]
+  },
+  "url": "https://www.st.com/en/microcontrollers-microprocessors/stm32u031k8.html",
+  "vendor": "Generic"
+}
