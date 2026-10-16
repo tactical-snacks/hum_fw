@@ -1,7 +1,7 @@
 #include <Arduino.h>
 
 
-
+// pin assignments
 #define LED_GPIO_Port        GPIOA   // PA8,  pin 18, active high
 #define LED_Pin              GPIO_PIN_8
 #define BTN_GPIO_Port        GPIOA   // PA1,  pin 7,  active low, pull-up, WKUP3
