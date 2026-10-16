@@ -1,4 +1,5 @@
 .pio
+.vscode
 .cache
 .dummy
 .vscode/.browse.c_cpp.db*
@@ -6,3 +7,5 @@
 .vscode/launch.json
 .vscode/ipch
 compile_commands.json
+~*
+.claude
