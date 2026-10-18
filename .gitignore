@@ -8,4 +8,4 @@
 .vscode/ipch
 compile_commands.json
 ~*
-.claude
+.claude/settings.local.json

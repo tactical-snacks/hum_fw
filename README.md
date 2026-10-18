@@ -14,3 +14,19 @@ Hour Utilization Monitor: a coin-cell data logger that timestamps machine run ti
 | UI | Button (PA1), green LED (PA8) |
 | Debug | SWD, ARM 10-pin header |
 | Comms | UART, PA9 TX / PA10 RX |
+
+## Docs
+
+- [Schematic](docs/hum_hw.pdf) (KiCad export from the `hum_hw` repo)
+- Datasheets:
+  - [STM32U031](docs/STMicro%20STM32U031%20Datasheet.pdf)
+  - [LIS2DTW12](docs/STMicro%20LIS2DTW12TR%20Datasheet.pdf)
+  - [24FC512](docs/Microchip%2024FC512%20Datasheet.pdf)
+- [Engine frequency brackets](docs/hum_engine_freq.md): idle, operating, and off bands for run detection
+- [Engine recordings](docs/recording.zip): WAV clips of cranking, cold idle, transition, and high RPM
+
+# Changelog
+
+## [UNRELEASED]
+
+### Added
