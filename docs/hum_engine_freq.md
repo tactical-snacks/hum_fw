@@ -20,9 +20,8 @@ Source: phone audio
 
 ## Firmware notes
 
-- Audio amplitude is nearly identical across running states, so classify by frequency.
-- Compare band energy (40–55 Hz vs 95–120 Hz) with Goertzel; no FFT needed.
-- Accelerometer: 800 Hz ODR, bandwidth ODR/4. 400 Hz ODR aliases the 322 Hz harmonic to ~78 Hz.
+- Compare band energy (40–55 Hz vs 95–120 Hz) with Goertzel; no FFT needed. <<< learn this
+- Accelerometer: 800 Hz ODR, bandwidth ODR/4. 400 Hz ODR aliases the 322 Hz harmonic to ~78 Hz. <<< also learn this
 - Capture 512 samples (0.64 s), duty-cycled, with a wake-up interrupt for engine start.
 
 ## To verify
