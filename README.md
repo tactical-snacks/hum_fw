@@ -25,6 +25,12 @@ Hour Utilization Monitor: a coin-cell data logger that timestamps machine run ti
 - [Engine frequency brackets](docs/hum_engine_freq.md): idle, operating, and off bands for run detection
 - [Engine recordings](docs/recording.zip): WAV clips of cranking, cold idle, transition, and high RPM
 
+## Dev
+1. freq bracket indicate - LED/serial output current freq bracket
+2. bracket time - serial output time in bracket for a continuous session
+3. store and retrieve - keep running tally
+4. timestamp
+
 # Changelog
 
 ## [UNRELEASED]

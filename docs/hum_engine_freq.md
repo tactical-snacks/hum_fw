@@ -1,14 +1,12 @@
 # HUM – Engine Frequency Brackets
 
-Source: `Start_up_and_run.m4a` (phone audio, proxy for vibration).
+Source: phone audio
 
 ## States
 
 | State | Clip time | Fundamental (1x) | RPM* |
 |---|---|---|---|
 | Off | 3–9 s, 83 s+ | none | 0 |
-| Cranking | 10–14 s | broadband | — |
-| Cold idle | 15–26 s | 45–47 Hz | ~2,750 |
 | Transition | 53–59 s | 72–103 Hz | — |
 | High RPM | 72–81 s | ~107.5 Hz | ~6,450 |
 
@@ -18,7 +16,7 @@ Source: `Start_up_and_run.m4a` (phone audio, proxy for vibration).
 
 - **Idle:** 40–55 Hz
 - **Operating:** 65–150 Hz
-- **Off:** below activity threshold, no harmonic structure
+- **Off:** below idle bracket
 
 ## Firmware notes
 
@@ -30,4 +28,3 @@ Source: `Start_up_and_run.m4a` (phone audio, proxy for vibration).
 ## To verify
 
 - Thresholds come from audio; confirm with raw accelerometer captures from the mounted board.
-- Warm idle and steady part-throttle are not represented.
