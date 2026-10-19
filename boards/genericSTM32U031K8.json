@@ -6,7 +6,7 @@
     "core": "stm32",
     "cpu": "cortex-m0plus",
     "extra_flags": "-DSTM32U0 -DSTM32U0xx -DSTM32U031xx",
-    "f_cpu": "56000000L",
+    "f_cpu": "16000000L",
     "framework_extra_flags": {
       "arduino": "-D__CORTEX_SC=0"
     },

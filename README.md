@@ -26,10 +26,11 @@ Hour Utilization Monitor: a coin-cell data logger that timestamps machine run ti
 - [Engine recordings](docs/recording.zip): WAV clips of cranking, cold idle, transition, and high RPM
 
 ## Dev
-1. freq bracket indicate - LED/serial output current freq bracket
-2. bracket time - serial output time in bracket for a continuous session
-3. store and retrieve - keep running tally
-4. timestamp
+1. hello world
+2. freq bracket indicate - LED/serial output current freq bracket
+3. bracket time - serial output time in bracket for a continuous session
+4. store and retrieve - keep running tally
+5. timestamp
 
 # Changelog
 
