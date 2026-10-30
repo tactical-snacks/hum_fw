@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <Wire.h>
 
 
 // pin assignments (Arduino pin names; for HAL use digitalPinToPort() / digitalPinToBitMask())
@@ -16,9 +17,25 @@
 
 #define UART_BAUD            115200
 
+// LIS2DTW12 registers (datasheet DS12825 section 8)
+#define ACC_REG_WHO_AM_I     0x0FU   // reads 0x44
+#define ACC_REG_CTRL1        0x20U   // ODR[7:4], MODE[3:2], LP_MODE[1:0]
+#define ACC_REG_CTRL2        0x21U   // BOOT, SOFT_RESET, -, CS_PU_DISC, BDU, IF_ADD_INC, I2C_DISABLE, SIM
+#define ACC_REG_CTRL6        0x25U   // BW_FILT[7:6], FS[5:4], FDS, LOW_NOISE
+#define ACC_REG_OUT_X_L      0x28U   // X, Y, Z as 16-bit LE, 14-bit left-justified
+
+#define ACC_WHO_AM_I_VAL     0x44U
+#define ACC_CTRL1_12HZ5_HP   0x24U   // ODR 12.5 Hz, high-performance (14-bit)
+#define ACC_CTRL2_SOFT_RESET 0x40U
+#define ACC_CTRL2_BDU_INC    0x0CU   // block data update, address auto-increment
+#define ACC_CTRL6_2G         0x00U   // +/-2 g, ODR/2 bandwidth, low-noise off
+#define ACC_UG_PER_LSB       244     // +/-2 g, 14-bit: 0.244 mg/LSB
+
 
 // the variant's default Serial is USART4 on PA0/PA1 (ACC_INT1/BTN), so use USART1
 Uart uart(UART_RX_PIN, UART_TX_PIN);
+
+static bool acc_ok = false;
 
 
 // replaces the variant's empty weak default; runs before setup()
@@ -57,14 +74,87 @@ extern "C" void SystemClock_Config(void) {
 }
 
 
+static bool acc_write(uint8_t reg, uint8_t val) {
+  Wire.beginTransmission((uint8_t)ACC_I2C_ADDR);
+  Wire.write(reg);
+  Wire.write(val);
+  return Wire.endTransmission() == 0;
+}
+
+static bool acc_read(uint8_t reg, uint8_t *buf, uint8_t len) {
+  Wire.beginTransmission((uint8_t)ACC_I2C_ADDR);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) {
+    return false;
+  }
+  if (Wire.requestFrom((uint8_t)ACC_I2C_ADDR, len) != len) {
+    return false;
+  }
+  for (uint8_t i = 0; i < len; i++) {
+    buf[i] = Wire.read();
+  }
+  return true;
+}
+
+static bool acc_init(void) {
+  uint8_t val = 0;
+
+  if (!acc_read(ACC_REG_WHO_AM_I, &val, 1) || val != ACC_WHO_AM_I_VAL) {
+    uart.printf("acc: WHO_AM_I 0x%02X, expected 0x%02X\r\n", val, ACC_WHO_AM_I_VAL);
+    return false;
+  }
+
+  // soft reset clears itself when done
+  acc_write(ACC_REG_CTRL2, ACC_CTRL2_SOFT_RESET);
+  do {
+    delay(1);
+    if (!acc_read(ACC_REG_CTRL2, &val, 1)) {
+      return false;
+    }
+  } while (val & ACC_CTRL2_SOFT_RESET);
+
+  return acc_write(ACC_REG_CTRL2, ACC_CTRL2_BDU_INC) &&
+         acc_write(ACC_REG_CTRL6, ACC_CTRL6_2G) &&
+         acc_write(ACC_REG_CTRL1, ACC_CTRL1_12HZ5_HP);
+}
+
+// returns acceleration in mg
+static bool acc_read_mg(int32_t *x, int32_t *y, int32_t *z) {
+  uint8_t buf[6];
+
+  if (!acc_read(ACC_REG_OUT_X_L, buf, sizeof(buf))) {
+    return false;
+  }
+  *x = ((int16_t)(buf[1] << 8 | buf[0]) >> 2) * ACC_UG_PER_LSB / 1000;
+  *y = ((int16_t)(buf[3] << 8 | buf[2]) >> 2) * ACC_UG_PER_LSB / 1000;
+  *z = ((int16_t)(buf[5] << 8 | buf[4]) >> 2) * ACC_UG_PER_LSB / 1000;
+  return true;
+}
+
+
 void setup() {
   pinMode(LED_PIN, OUTPUT);
   uart.begin(UART_BAUD);
+
+  // the variant's default Wire is PA6/PA7, so move it to I2C1 on PB6/PB7
+  Wire.setSDA(I2C_SDA_PIN);
+  Wire.setSCL(I2C_SCL_PIN);
+  Wire.begin();
+
+  uart.println("hello");
+  acc_ok = acc_init();
+  uart.println(acc_ok ? "acc: ok" : "acc: init failed");
 }
 
 void loop() {
+  int32_t x, y, z;
+
   digitalWrite(LED_PIN, HIGH);
-  uart.println("hello");
+  if (acc_ok && acc_read_mg(&x, &y, &z)) {
+    uart.printf("x=%5ld y=%5ld z=%5ld mg\r\n", x, y, z);
+  } else {
+    uart.println("acc: read failed");
+  }
   delay(500);
   digitalWrite(LED_PIN, LOW);
   delay(500);

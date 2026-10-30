@@ -39,3 +39,5 @@ Hour Utilization Monitor: a coin-cell data logger that timestamps machine run ti
 
 ### Added
 
+- LIS2DTW12 accelerometer bring-up: WHO_AM_I check, X/Y/Z in mg over UART at 1 Hz
+
