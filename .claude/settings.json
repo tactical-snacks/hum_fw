@@ -1,5 +1,15 @@
 {
   "permissions": {
-    "blockReadsOutsideWorkingDirectories": true
+    "blockReadsOutsideWorkingDirectories": true,
+    "allow": [
+      "Bash(pio run *)",
+      "Bash(pio device list *)",
+      "Bash(~/.platformio/penv/Scripts/pio.exe run *)",
+      "Bash(~/.platformio/penv/Scripts/pio.exe device list *)",
+      "Bash(~/.platformio/packages/tool-openocd/bin/openocd.exe *)",
+      "Bash(~/.platformio/packages/toolchain-gccarmnoneeabi/bin/arm-none-eabi-addr2line.exe *)",
+      "Bash(~/.platformio/packages/toolchain-gccarmnoneeabi/bin/arm-none-eabi-objdump.exe *)",
+      "Bash(~/.platformio/penv/Scripts/python.exe -I tools/serial_capture.py *)"
+    ]
   }
 }
