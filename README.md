@@ -29,7 +29,7 @@ Hour Utilization Monitor: a coin-cell data logger that timestamps machine run ti
 ## Dev
 - [x] hello world
 - [x] interface with accel, eep
-- [ ] rtc setup
+- [x] rtc setup
 - [ ] freq bracket indicate - LED/serial output current freq bracket
 - [ ] bracket time - serial output time in bracket for a continuous session
 - [ ] store and retrieve - keep running tally
@@ -43,4 +43,5 @@ Hour Utilization Monitor: a coin-cell data logger that timestamps machine run ti
 
 - LIS2DTW12 accelerometer bring-up: WHO_AM_I check, X/Y/Z in mg over UART at 1 Hz
 - 24FC512 EEPROM bring-up: boot counter at 0x0000
+- RTC on LSE: set over UART with [tools/set_rtc.py](tools/tools.md#set_rtcpy), kept through resets and reflashing, timestamp on button print, LED blips 5 ms/s while unset
 
