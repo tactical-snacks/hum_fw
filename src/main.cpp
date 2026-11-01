@@ -17,6 +17,9 @@
 
 #define UART_BAUD            115200
 #define BTN_DEBOUNCE_MS      30U     // no external pull-up or RC on PA1
+#define LED_UNSET_ON_MS      5U      // clock-unset blip: 5 ms on every LED_UNSET_PERIOD_MS
+#define LED_UNSET_PERIOD_MS  1000U
+#define RX_LINE_MAX          32U
 
 // LIS2DTW12 registers (datasheet DS12825 section 8)
 #define ACC_REG_WHO_AM_I     0x0FU   // reads 0x44
@@ -55,10 +58,14 @@
 // the variant's default Serial is USART4 on PA0/PA1 (ACC_INT1/BTN), so use USART1
 Uart uart(UART_RX_PIN, UART_TX_PIN);
 
+static RTC_HandleTypeDef hrtc;
+
 static bool lse_ok = false;
+static bool rtc_ok = false;
 static bool acc_ok = false;
 static bool eep_ok = false;
 static uint32_t eep_fall_count = 0;
+static volatile bool ff_active = false;     // ISR owns the LED while true
 static volatile uint32_t ff_start_ms = 0;
 static volatile uint32_t ff_pending = 0;     // long falls not yet written to EEPROM
 
@@ -158,8 +165,10 @@ static bool acc_init(void) {
 static void acc_ff_isr(void) {
   if (digitalRead(ACC_INT1_PIN) == HIGH) {
     ff_start_ms = millis();
+    ff_active = true;
     digitalWrite(LED_PIN, HIGH);
   } else {
+    ff_active = false;
     digitalWrite(LED_PIN, LOW);
     if (millis() - ff_start_ms + ACC_FF_DETECT_MS > FF_LOG_MIN_MS) {
       ff_pending++;
@@ -275,6 +284,118 @@ static uint32_t vcc_read_mv(void) {
 }
 
 
+// RTC on LSE, 1 Hz = 32768 / (127 + 1) / (255 + 1); calendar and prescalers live in the backup domain
+static bool rtc_init(void) {
+  RCC_PeriphCLKInitTypeDef clk = {};
+
+  if (!lse_ok) {
+    return false;
+  }
+  // only resets the backup domain if a different RTC clock was already selected
+  clk.PeriphClockSelection = RCC_PERIPHCLK_RTC;
+  clk.RTCClockSelection = RCC_RTCCLKSOURCE_LSE;
+  if (HAL_RCCEx_PeriphCLKConfig(&clk) != HAL_OK) {
+    return false;
+  }
+  __HAL_RCC_RTC_ENABLE();
+  __HAL_RCC_RTCAPB_CLK_ENABLE();
+
+  hrtc.Instance = RTC;
+  hrtc.Init.HourFormat = RTC_HOURFORMAT_24;
+  hrtc.Init.AsynchPrediv = 127;
+  hrtc.Init.SynchPrediv = 255;
+  hrtc.Init.OutPut = RTC_OUTPUT_DISABLE;
+  hrtc.Init.OutPutRemap = RTC_OUTPUT_REMAP_NONE;
+  hrtc.Init.OutPutPolarity = RTC_OUTPUT_POLARITY_HIGH;
+  hrtc.Init.OutPutType = RTC_OUTPUT_TYPE_OPENDRAIN;
+  hrtc.Init.OutPutPullUp = RTC_OUTPUT_PULLUP_NONE;
+  hrtc.Init.BinMode = RTC_BINARY_NONE;
+  hrtc.Init.BinMixBcdU = RTC_BINARY_MIX_BCDU_0;
+
+  // re-initializing a running clock restarts the prescalers and loses up to 1 s, so skip it once set
+  if (!(RTC->ICSR & RTC_ICSR_INITS)) {
+    return HAL_RTC_Init(&hrtc) == HAL_OK;
+  }
+  // shadow registers are stale after reset until RSF sets (2 RTCCLK)
+  uint32_t start = millis();
+  while (!(RTC->ICSR & RTC_ICSR_RSF)) {
+    if (millis() - start > 10) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// INITS sets once a date is written and clears on backup domain reset (power loss)
+static bool rtc_is_set(void) {
+  return rtc_ok && (RTC->ICSR & RTC_ICSR_INITS);
+}
+
+// YYYYMMDD-HH:MM:SS, 24 h; buf needs 18 bytes
+static bool rtc_format(char *buf, size_t len) {
+  RTC_TimeTypeDef t;
+  RTC_DateTypeDef d;
+
+  if (!rtc_is_set()) {
+    return false;
+  }
+  // GetDate must follow GetTime to unlock the shadow registers
+  HAL_RTC_GetTime(&hrtc, &t, RTC_FORMAT_BIN);
+  HAL_RTC_GetDate(&hrtc, &d, RTC_FORMAT_BIN);
+  snprintf(buf, len, "%04u%02u%02u-%02u:%02u:%02u", 2000U + d.Year, d.Month, d.Date,
+           t.Hours, t.Minutes, t.Seconds);
+  return true;
+}
+
+static int parse_num(const char *s, int digits) {
+  int n = 0;
+
+  for (int i = 0; i < digits; i++) {
+    if (s[i] < '0' || s[i] > '9') {
+      return -1;
+    }
+    n = n * 10 + (s[i] - '0');
+  }
+  return n;
+}
+
+// sets the clock from YYYYMMDD-HH:MM:SS
+static bool rtc_set(const char *s) {
+  static const uint8_t mdays[] = {31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+  RTC_TimeTypeDef t = {};
+  RTC_DateTypeDef d = {};
+
+  if (!rtc_ok || strlen(s) != 17 || s[8] != '-' || s[11] != ':' || s[14] != ':') {
+    return false;
+  }
+  int year = parse_num(s, 4), mon = parse_num(s + 4, 2), day = parse_num(s + 6, 2);
+  int hour = parse_num(s + 9, 2), min = parse_num(s + 12, 2), sec = parse_num(s + 15, 2);
+  // year 2000 would leave INITS clear, which reads as unset
+  if (year < 2001 || year > 2099 || mon < 1 || mon > 12 || day < 1 || day > mdays[mon - 1] ||
+      (mon == 2 && day == 29 && year % 4 != 0) || hour < 0 || hour > 23 || min < 0 || min > 59 ||
+      sec < 0 || sec > 59) {
+    return false;
+  }
+
+  // Sakamoto's day of week, 0 = Sunday; the RTC wants Monday = 1 .. Sunday = 7
+  static const uint8_t mt[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
+  int y = year - (mon < 3);
+  int wd = (y + y / 4 - y / 100 + y / 400 + mt[mon - 1] + day) % 7;
+
+  t.Hours = hour;
+  t.Minutes = min;
+  t.Seconds = sec;
+  t.DayLightSaving = RTC_DAYLIGHTSAVING_NONE;
+  t.StoreOperation = RTC_STOREOPERATION_RESET;
+  d.Year = year - 2000;
+  d.Month = mon;
+  d.Date = day;
+  d.WeekDay = wd ? wd : 7;
+  return HAL_RTC_SetTime(&hrtc, &t, RTC_FORMAT_BIN) == HAL_OK &&
+         HAL_RTC_SetDate(&hrtc, &d, RTC_FORMAT_BIN) == HAL_OK;
+}
+
+
 void setup() {
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
@@ -290,6 +411,15 @@ void setup() {
 
   uart.println("hello");
   uart.println(lse_ok ? "lse: ok" : "lse: FAIL, MSI untrimmed");
+  rtc_ok = rtc_init();
+  char ts[18];
+  if (!rtc_ok) {
+    uart.println("rtc: FAIL");
+  } else if (rtc_format(ts, sizeof(ts))) {
+    uart.printf("rtc: %s\r\n", ts);
+  } else {
+    uart.println("rtc: unset, send TYYYYMMDD-HH:MM:SS (tools/set_rtc.py)");
+  }
   uart.printf("vcc: %lu mV\r\n", vcc_read_mv());
   acc_ok = acc_init();
   uart.println(acc_ok ? "acc: ok" : "acc: init failed");
@@ -315,9 +445,57 @@ static bool btn_pressed(void) {
   return false;
 }
 
+// clock unset: 5 ms blip each second (swap for Flasher's portable branch once it's public)
+static void led_service(void) {
+  static bool blip = false;
+  bool on = !rtc_is_set() && millis() % LED_UNSET_PERIOD_MS < LED_UNSET_ON_MS;
+
+  if (on == blip) {
+    return;
+  }
+  blip = on;
+  noInterrupts();
+  if (!ff_active) {
+    digitalWrite(LED_PIN, on ? HIGH : LOW);
+  }
+  interrupts();
+}
+
+// line commands on UART RX: T<YYYYMMDD-HH:MM:SS> sets the clock
+static void rx_service(void) {
+  static char line[RX_LINE_MAX];
+  static uint8_t n = 0;
+  char ts[18];
+
+  while (uart.available()) {
+    char c = uart.read();
+
+    if (c != '\r' && c != '\n') {
+      if (n < sizeof(line) - 1) {
+        line[n++] = c;
+      }
+      continue;
+    }
+    if (n == 0) {
+      continue;
+    }
+    line[n] = '\0';
+    n = 0;
+    if (line[0] == 'T' && rtc_set(line + 1) && rtc_format(ts, sizeof(ts))) {
+      uart.printf("rtc: set %s\r\n", ts);
+    } else {
+      uart.printf("rtc: bad command '%s'\r\n", line);
+    }
+  }
+}
+
 
 void loop() {
   int32_t x, y, z;
+  char ts[18];
+
+  led_service();
+  rx_service();
 
   // EEPROM writes happen here, not in the ISR; ff_pending is only decremented here
   while (ff_pending > 0) {
@@ -333,10 +511,14 @@ void loop() {
   if (btn_pressed()) {
     uint32_t vcc = vcc_read_mv();
 
+    if (!rtc_format(ts, sizeof(ts))) {
+      strcpy(ts, "rtc unset");
+    }
     if (acc_ok && acc_read_mg(&x, &y, &z)) {
-      uart.printf("x=%5ld y=%5ld z=%5ld mg  falls %lu  vcc %lu mV\r\n", x, y, z, eep_fall_count, vcc);
+      uart.printf("%s  x=%5ld y=%5ld z=%5ld mg  falls %lu  vcc %lu mV\r\n", ts, x, y, z,
+                  eep_fall_count, vcc);
     } else {
-      uart.printf("acc: read failed  falls %lu  vcc %lu mV\r\n", eep_fall_count, vcc);
+      uart.printf("%s  acc: read failed  falls %lu  vcc %lu mV\r\n", ts, eep_fall_count, vcc);
     }
   }
 }

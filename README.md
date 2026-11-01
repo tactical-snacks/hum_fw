@@ -24,10 +24,12 @@ Hour Utilization Monitor: a coin-cell data logger that timestamps machine run ti
   - [24FC512](docs/Microchip%2024FC512%20Datasheet.pdf)
 - [Engine frequency brackets](docs/hum_engine_freq.md): idle, operating, and off bands for run detection
 - [Engine recordings](docs/recording.zip): WAV clips of cranking, cold idle, transition, and high RPM
+- [Bench tools](tools/tools.md): setting the RTC, serial capture, crystal startup test
 
 ## Dev
 - [x] hello world
 - [x] interface with accel, eep
+- [ ] rtc setup
 - [ ] freq bracket indicate - LED/serial output current freq bracket
 - [ ] bracket time - serial output time in bracket for a continuous session
 - [ ] store and retrieve - keep running tally
@@ -41,7 +43,4 @@ Hour Utilization Monitor: a coin-cell data logger that timestamps machine run ti
 
 - LIS2DTW12 accelerometer bring-up: WHO_AM_I check, X/Y/Z in mg over UART at 1 Hz
 - 24FC512 EEPROM bring-up: boot counter at 0x0000
-- Free-fall: LED on while INT1 reports free-fall; falls over 1 s counted in EEPROM at 0x0004
-- Button (PA1): prints accel X/Y/Z, free-fall count, and VCC
-- VCC measurement via VREFINT and factory calibration
 
