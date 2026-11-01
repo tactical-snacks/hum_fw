@@ -24,6 +24,7 @@
 #define RX_LINE_MAX          32U
 
 // LIS2DTW12 registers (datasheet DS12825 section 8)
+#define ACC_REG_OUT_T_L      0x0DU   // temperature, 12-bit LE left-justified, 16 LSB/C, 0 = 25 C
 #define ACC_REG_WHO_AM_I     0x0FU   // reads 0x44
 #define ACC_REG_CTRL1        0x20U   // ODR[7:4], MODE[3:2], LP_MODE[1:0]
 #define ACC_REG_CTRL2        0x21U   // BOOT, SOFT_RESET, -, CS_PU_DISC, BDU, IF_ADD_INC, I2C_DISABLE, SIM
@@ -181,6 +182,17 @@ static bool acc_read_mg(int32_t *x, int32_t *y, int32_t *z) {
   *x = ((int16_t)(buf[1] << 8 | buf[0]) >> 2) * ACC_UG_PER_LSB / 1000;
   *y = ((int16_t)(buf[3] << 8 | buf[2]) >> 2) * ACC_UG_PER_LSB / 1000;
   *z = ((int16_t)(buf[5] << 8 | buf[4]) >> 2) * ACC_UG_PER_LSB / 1000;
+  return true;
+}
+
+// die temperature in tenths of a degree C; +/-0.8 C typ over 0..70 C
+static bool acc_read_temp_dc(int32_t *dc) {
+  uint8_t buf[2];
+
+  if (!acc_read(ACC_REG_OUT_T_L, buf, sizeof(buf))) {
+    return false;
+  }
+  *dc = 250 + ((int16_t)(buf[1] << 8 | buf[0]) >> 4) * 10 / 16;
   return true;
 }
 
@@ -515,17 +527,18 @@ static bool rx_service(void) {
   return got;
 }
 
-// one status line: time, what triggered it, acceleration, supply
+// one status line: time, what triggered it, acceleration, temperature, supply
 static void print_status(const char *why) {
   char ts[18];
-  int32_t x, y, z;
+  int32_t x, y, z, dc;
   uint32_t vcc = vcc_read_mv();
 
   if (!rtc_format(ts, sizeof(ts))) {
     strcpy(ts, "rtc unset");
   }
-  if (acc_ok && acc_read_mg(&x, &y, &z)) {
-    uart.printf("%s  %s  x=%5ld y=%5ld z=%5ld mg  vcc %lu mV\r\n", ts, why, x, y, z, vcc);
+  if (acc_ok && acc_read_mg(&x, &y, &z) && acc_read_temp_dc(&dc)) {
+    uart.printf("%s  %s  x=%5ld y=%5ld z=%5ld mg  temp %s%ld.%ld C  vcc %lu mV\r\n", ts, why,
+                x, y, z, dc < 0 ? "-" : "", labs(dc) / 10, labs(dc) % 10, vcc);
   } else {
     uart.printf("%s  %s  acc: read failed  vcc %lu mV\r\n", ts, why, vcc);
   }
@@ -540,7 +553,7 @@ void loop() {
     awake_ms = millis();
   }
   if (btn_pressed()) {
-    print_status("btn");
+    print_status("wake btn");
     awake_ms = millis();
   }
   // motion while awake: just re-arm INT1, don't extend the window

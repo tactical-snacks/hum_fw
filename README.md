@@ -43,7 +43,7 @@ Hour Utilization Monitor: a coin-cell data logger that timestamps machine run ti
 
 | | Used | Total | |
 |---|---:|---:|---:|
-| Flash | 41,996 B | 64 KB | 64% |
+| Flash | 42,100 B | 64 KB | 64% |
 | RAM | 2,192 B | 12 KB | 18% |
 
 ### Added
@@ -52,4 +52,5 @@ Hour Utilization Monitor: a coin-cell data logger that timestamps machine run ti
 - 24FC512 EEPROM bring-up: boot counter at 0x0000
 - RTC on LSE: set over UART with [tools/set_rtc.py](tools/tools.md#set_rtcpy), kept through resets and reflashing, timestamp on button print, LED blips 5 ms/s while unset
 - Sleep: MCU in Stop 2, accel in low-power mode 1 with a motion wake-up on INT1, EEPROM in standby; wakes on motion or button, flashes the LED and prints status, stays up 5 s; no sleep while the RTC is unset
+- Temperature from the accel's sensor in the status line
 
