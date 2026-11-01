@@ -41,4 +41,7 @@ Hour Utilization Monitor: a coin-cell data logger that timestamps machine run ti
 
 - LIS2DTW12 accelerometer bring-up: WHO_AM_I check, X/Y/Z in mg over UART at 1 Hz
 - 24FC512 EEPROM bring-up: boot counter at 0x0000
+- Free-fall: LED on while INT1 reports free-fall; falls over 1 s counted in EEPROM at 0x0004
+- Button (PA1): prints accel X/Y/Z, free-fall count, and VCC
+- VCC measurement via VREFINT and factory calibration
 
