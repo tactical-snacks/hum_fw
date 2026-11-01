@@ -19,40 +19,39 @@
 #define BTN_DEBOUNCE_MS      30U     // no external pull-up or RC on PA1
 #define LED_UNSET_ON_MS      5U      // clock-unset blip: 5 ms on every LED_UNSET_PERIOD_MS
 #define LED_UNSET_PERIOD_MS  1000U
+#define LED_WAKE_MS          50U     // flash on each wake
+#define AWAKE_MS             5000U   // stay up after a wake for button presses and serial commands
 #define RX_LINE_MAX          32U
 
 // LIS2DTW12 registers (datasheet DS12825 section 8)
 #define ACC_REG_WHO_AM_I     0x0FU   // reads 0x44
 #define ACC_REG_CTRL1        0x20U   // ODR[7:4], MODE[3:2], LP_MODE[1:0]
 #define ACC_REG_CTRL2        0x21U   // BOOT, SOFT_RESET, -, CS_PU_DISC, BDU, IF_ADD_INC, I2C_DISABLE, SIM
-#define ACC_REG_CTRL4        0x23U   // INT1 pad routing, bit 4 INT1_FF
+#define ACC_REG_CTRL3        0x22U   // ST[7:6], PP_OD, LIR, H_LACTIVE, -, SLP_MODE_SEL, SLP_MODE_1
+#define ACC_REG_CTRL4        0x23U   // INT1 pad routing, bit 5 INT1_WU
 #define ACC_REG_CTRL6        0x25U   // BW_FILT[7:6], FS[5:4], FDS, LOW_NOISE
-#define ACC_REG_OUT_X_L      0x28U   // X, Y, Z as 16-bit LE, 14-bit left-justified
-#define ACC_REG_FREE_FALL    0x36U   // FF_DUR[4:0] in [7:3], FF_THS[2:0]
+#define ACC_REG_OUT_X_L      0x28U   // X, Y, Z as 16-bit LE, left-justified
+#define ACC_REG_WAKE_UP_THS  0x34U   // SINGLE_DOUBLE_TAP, SLEEP_ON, WK_THS[5:0]
+#define ACC_REG_ALL_INT_SRC  0x3BU   // reading clears latched interrupts
 #define ACC_REG_CTRL7        0x3FU   // DRDY_PULSED, INT2_ON_INT1, INTERRUPTS_ENABLE, ...
 
 #define ACC_WHO_AM_I_VAL     0x44U
-#define ACC_ODR_MS           80U     // 12.5 Hz
-#define ACC_CTRL1_12HZ5_HP   0x24U   // ODR 12.5 Hz, high-performance (14-bit)
+#define ACC_CTRL1_12HZ5_LP1  0x20U   // ODR 12.5 Hz, low-power mode 1 (12-bit, ~1 uA)
 #define ACC_CTRL2_SOFT_RESET 0x40U
 #define ACC_CTRL2_BDU_INC    0x0CU   // block data update, address auto-increment
-#define ACC_CTRL4_INT1_FF    0x10U
+#define ACC_CTRL3_LIR        0x10U   // latch INT1 until ALL_INT_SRC is read
+#define ACC_CTRL4_INT1_WU    0x20U
 #define ACC_CTRL6_2G         0x00U   // +/-2 g, ODR/2 bandwidth, low-noise off
 #define ACC_CTRL7_INT_EN     0x20U   // INTERRUPTS_ENABLE
-#define ACC_UG_PER_LSB       244     // +/-2 g, 14-bit: 0.244 mg/LSB
-
-// free-fall: all axes below 312 mg (FF_THS 011 = 10 LSB x 31.25 mg) for FF_DUR samples
-// INT1 is non-latched (CTRL3 LIR = 0), so it stays high for as long as the fall lasts
-#define ACC_FF_DUR           2U
-#define ACC_FF_THS_312MG     0x03U
-#define ACC_FF_DETECT_MS     (ACC_FF_DUR * ACC_ODR_MS)
-#define FF_LOG_MIN_MS        1000U   // falls longer than this are counted in EEPROM
+#define ACC_WU_THS           2U      // wake on motion over 2 x 31.25 mg (1/64 of FS), high-pass filtered
+#define ACC_INT_DROP_MS      200U    // INT1 drops on the next internal sample after a clear (80 ms at 12.5 Hz)
+#define ACC_UG_PER_LSB       244     // +/-2 g: 0.244 mg per 14-bit LSB
 
 // 24FC512: 64 KB, 2-byte address, 128-byte pages, 5 ms max write cycle, WP = GND
+// no sleep command: it drops to standby (1 uA max) whenever the bus is idle and no write is running
 #define EEP_PAGE_SIZE        128U
 #define EEP_WRITE_TIMEOUT_MS 10U
 #define EEP_ADDR_BOOT_COUNT  0x0000U  // uint32_t LE, 0xFFFFFFFF when erased
-#define EEP_ADDR_FALL_COUNT  0x0004U  // uint32_t LE, falls over FF_LOG_MIN_MS
 
 
 // the variant's default Serial is USART4 on PA0/PA1 (ACC_INT1/BTN), so use USART1
@@ -64,13 +63,13 @@ static bool lse_ok = false;
 static bool rtc_ok = false;
 static bool acc_ok = false;
 static bool eep_ok = false;
-static uint32_t eep_fall_count = 0;
-static volatile bool ff_active = false;     // ISR owns the LED while true
-static volatile uint32_t ff_start_ms = 0;
-static volatile uint32_t ff_pending = 0;     // long falls not yet written to EEPROM
+static volatile bool btn_woke = false;      // set by the PA1 / PA0 EXTI handlers
+static volatile bool acc_woke = false;
+static bool btn_down = false;               // debounced button state
+static uint32_t btn_stable_ms = 0;
 
 
-// replaces the variant's empty weak default; runs before setup()
+// replaces the variant's empty weak default; runs before setup() and again after each Stop 2 wake
 // SYSCLK = MSI 16 MHz, voltage range 2 (max 16 MHz, 1 WS), MSI trimmed by LSE (MSI PLL mode)
 extern "C" void SystemClock_Config(void) {
   RCC_OscInitTypeDef osc = {};
@@ -136,6 +135,7 @@ static bool acc_read(uint8_t reg, uint8_t *buf, uint8_t len) {
   return true;
 }
 
+// low-power mode 1 at 12.5 Hz, with a latched wake-up (motion) interrupt on INT1
 static bool acc_init(void) {
   uint8_t val = 0;
 
@@ -154,29 +154,24 @@ static bool acc_init(void) {
   } while (val & ACC_CTRL2_SOFT_RESET);
 
   return acc_write(ACC_REG_CTRL2, ACC_CTRL2_BDU_INC) &&
+         acc_write(ACC_REG_CTRL3, ACC_CTRL3_LIR) &&
          acc_write(ACC_REG_CTRL6, ACC_CTRL6_2G) &&
-         acc_write(ACC_REG_FREE_FALL, ACC_FF_DUR << 3 | ACC_FF_THS_312MG) &&
-         acc_write(ACC_REG_CTRL4, ACC_CTRL4_INT1_FF) &&
+         acc_write(ACC_REG_WAKE_UP_THS, ACC_WU_THS) &&
+         acc_write(ACC_REG_CTRL4, ACC_CTRL4_INT1_WU) &&
          acc_write(ACC_REG_CTRL7, ACC_CTRL7_INT_EN) &&
-         acc_write(ACC_REG_CTRL1, ACC_CTRL1_12HZ5_HP);
+         acc_write(ACC_REG_CTRL1, ACC_CTRL1_12HZ5_LP1);
 }
 
-// INT1 high = in free-fall: LED follows it, and falls over FF_LOG_MIN_MS are queued for EEPROM
-static void acc_ff_isr(void) {
-  if (digitalRead(ACC_INT1_PIN) == HIGH) {
-    ff_start_ms = millis();
-    ff_active = true;
-    digitalWrite(LED_PIN, HIGH);
-  } else {
-    ff_active = false;
-    digitalWrite(LED_PIN, LOW);
-    if (millis() - ff_start_ms + ACC_FF_DETECT_MS > FF_LOG_MIN_MS) {
-      ff_pending++;
-    }
-  }
+// INT1 stays high until this read (and up to one sample after), and only a fresh rising edge
+// can wake the MCU
+static void acc_clear_int(void) {
+  uint8_t src;
+
+  acc_read(ACC_REG_ALL_INT_SRC, &src, 1);
 }
 
-// returns acceleration in mg
+// returns acceleration in mg; low-power mode 1 zeroes the bottom 2 bits of the 14-bit field,
+// so the 14-bit scale still applies at 12-bit (0.976 mg) resolution
 static bool acc_read_mg(int32_t *x, int32_t *y, int32_t *z) {
   uint8_t buf[6];
 
@@ -252,7 +247,7 @@ static bool eep_write_count(uint16_t addr, uint32_t count) {
          eep_read(addr, (uint8_t *)&check, sizeof(check)) && check == count;
 }
 
-// probe the device, bump the boot counter, load the free-fall counter
+// probe the device and bump the boot counter
 static bool eep_init(void) {
   uint32_t boots;
 
@@ -266,12 +261,6 @@ static bool eep_init(void) {
     return false;
   }
   uart.printf("eep: boot count %lu\r\n", boots);
-
-  if (!eep_read_count(EEP_ADDR_FALL_COUNT, &eep_fall_count)) {
-    uart.println("eep: free-fall count read failed");
-    return false;
-  }
-  uart.printf("eep: free-falls over %u ms: %lu\r\n", FF_LOG_MIN_MS, eep_fall_count);
   return true;
 }
 
@@ -396,6 +385,46 @@ static bool rtc_set(const char *s) {
 }
 
 
+static void btn_isr(void) {
+  btn_woke = true;
+}
+
+static void acc_isr(void) {
+  acc_woke = true;
+}
+
+// Stop 2: RTC, LSE and the EXTI wake pins keep running, SRAM is kept, everything else stops.
+// SWD drops out too, so uploads connect under reset (see upload_flags in platformio.ini).
+static void mcu_sleep(void) {
+  acc_clear_int();
+  // wait for INT1 to actually drop; if it doesn't, motion is ongoing and the loop below wakes at once
+  uint32_t start = millis();
+  while (digitalRead(ACC_INT1_PIN) == HIGH && millis() - start < ACC_INT_DROP_MS) {
+  }
+  uart.flush();
+
+  // stop SysTick before masking, or a tick left pending ends WFI at once
+  HAL_SuspendTick();
+  // with interrupts masked, an edge that lands after a check still ends WFI immediately;
+  // unmasking briefly after each wake lets the EXTI handler set its flag
+  __disable_irq();
+  while (!btn_woke && !acc_woke) {
+    if (digitalRead(ACC_INT1_PIN) == HIGH) {
+      acc_woke = true;    // re-latched, so no rising edge is coming
+      break;
+    }
+    HAL_PWREx_EnterSTOP2Mode(PWR_STOPENTRY_WFI);
+    __enable_irq();
+    __disable_irq();
+  }
+  __enable_irq();
+  HAL_ResumeTick();
+
+  // wakes on MSI; restore LSE trim and the 16 MHz clock tree
+  SystemClock_Config();
+}
+
+
 void setup() {
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
@@ -426,21 +455,20 @@ void setup() {
   eep_ok = eep_init();
   uart.println(eep_ok ? "eep: ok" : "eep: FAIL");
 
-  attachInterrupt(digitalPinToInterrupt(ACC_INT1_PIN), acc_ff_isr, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(BTN_PIN), btn_isr, FALLING);
+  attachInterrupt(digitalPinToInterrupt(ACC_INT1_PIN), acc_isr, RISING);
 }
 
 // true once per press: the pin must read the new level for BTN_DEBOUNCE_MS before it counts
 static bool btn_pressed(void) {
-  static bool down = false;
-  static uint32_t stable_ms = 0;
   bool low = digitalRead(BTN_PIN) == LOW;
 
-  if (low == down) {
-    stable_ms = millis();
-  } else if (millis() - stable_ms >= BTN_DEBOUNCE_MS) {
-    down = low;
-    stable_ms = millis();
-    return down;
+  if (low == btn_down) {
+    btn_stable_ms = millis();
+  } else if (millis() - btn_stable_ms >= BTN_DEBOUNCE_MS) {
+    btn_down = low;
+    btn_stable_ms = millis();
+    return btn_down;
   }
   return false;
 }
@@ -450,21 +478,17 @@ static void led_service(void) {
   static bool blip = false;
   bool on = !rtc_is_set() && millis() % LED_UNSET_PERIOD_MS < LED_UNSET_ON_MS;
 
-  if (on == blip) {
-    return;
-  }
-  blip = on;
-  noInterrupts();
-  if (!ff_active) {
+  if (on != blip) {
+    blip = on;
     digitalWrite(LED_PIN, on ? HIGH : LOW);
   }
-  interrupts();
 }
 
-// line commands on UART RX: T<YYYYMMDD-HH:MM:SS> sets the clock
-static void rx_service(void) {
+// line commands on UART RX: T<YYYYMMDD-HH:MM:SS> sets the clock; returns true if a line arrived
+static bool rx_service(void) {
   static char line[RX_LINE_MAX];
   static uint8_t n = 0;
+  bool got = false;
   char ts[18];
 
   while (uart.available()) {
@@ -481,44 +505,69 @@ static void rx_service(void) {
     }
     line[n] = '\0';
     n = 0;
+    got = true;
     if (line[0] == 'T' && rtc_set(line + 1) && rtc_format(ts, sizeof(ts))) {
       uart.printf("rtc: set %s\r\n", ts);
     } else {
       uart.printf("rtc: bad command '%s'\r\n", line);
     }
   }
+  return got;
+}
+
+// one status line: time, what triggered it, acceleration, supply
+static void print_status(const char *why) {
+  char ts[18];
+  int32_t x, y, z;
+  uint32_t vcc = vcc_read_mv();
+
+  if (!rtc_format(ts, sizeof(ts))) {
+    strcpy(ts, "rtc unset");
+  }
+  if (acc_ok && acc_read_mg(&x, &y, &z)) {
+    uart.printf("%s  %s  x=%5ld y=%5ld z=%5ld mg  vcc %lu mV\r\n", ts, why, x, y, z, vcc);
+  } else {
+    uart.printf("%s  %s  acc: read failed  vcc %lu mV\r\n", ts, why, vcc);
+  }
 }
 
 
 void loop() {
-  int32_t x, y, z;
-  char ts[18];
+  static uint32_t awake_ms = 0;   // start of the current awake window
 
   led_service();
-  rx_service();
-
-  // EEPROM writes happen here, not in the ISR; ff_pending is only decremented here
-  while (ff_pending > 0) {
-    noInterrupts();
-    ff_pending--;
-    interrupts();
-    if (eep_ok && eep_write_count(EEP_ADDR_FALL_COUNT, eep_fall_count + 1)) {
-      eep_fall_count++;
-    }
-    uart.printf("free-fall over %u ms, total %lu\r\n", FF_LOG_MIN_MS, eep_fall_count);
+  if (rx_service()) {
+    awake_ms = millis();
   }
-
   if (btn_pressed()) {
-    uint32_t vcc = vcc_read_mv();
-
-    if (!rtc_format(ts, sizeof(ts))) {
-      strcpy(ts, "rtc unset");
-    }
-    if (acc_ok && acc_read_mg(&x, &y, &z)) {
-      uart.printf("%s  x=%5ld y=%5ld z=%5ld mg  falls %lu  vcc %lu mV\r\n", ts, x, y, z,
-                  eep_fall_count, vcc);
-    } else {
-      uart.printf("%s  acc: read failed  falls %lu  vcc %lu mV\r\n", ts, eep_fall_count, vcc);
-    }
+    print_status("btn");
+    awake_ms = millis();
   }
+  // motion while awake: just re-arm INT1, don't extend the window
+  if (acc_woke) {
+    acc_woke = false;
+    acc_clear_int();
+  }
+  btn_woke = false;
+
+  // stay awake while the clock is unset so the LED can blip
+  if (!rtc_is_set() || millis() - awake_ms < AWAKE_MS) {
+    return;
+  }
+
+  mcu_sleep();
+
+  const char *why = btn_woke ? "wake btn" : "wake acc";
+  if (btn_woke) {
+    // the press that woke us counts; debounce takes over from here so it isn't counted twice
+    btn_down = true;
+    btn_stable_ms = millis();
+  }
+  btn_woke = false;
+  acc_woke = false;
+  digitalWrite(LED_PIN, HIGH);
+  delay(LED_WAKE_MS);
+  digitalWrite(LED_PIN, LOW);
+  print_status(why);
+  awake_ms = millis();
 }

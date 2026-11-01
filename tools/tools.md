@@ -9,7 +9,21 @@ The Python scripts use pyserial from PlatformIO's virtual environment, so nothin
 | Windows | `~/.platformio/penv/Scripts/python.exe` |
 | Linux / macOS | `~/.platformio/penv/bin/python` |
 
-The examples below use the Windows path and `COM12`; substitute your own.
+The examples below use the Windows path.
+
+## Serial port and baud rate
+
+The scripts take the port and baud rate from PlatformIO's config, the same values `pio device monitor` uses:
+
+- `monitor_speed` is in `platformio.ini`.
+- `monitor_port` is machine-specific, so it goes in `platformio_local.ini` at the repo root. That file is gitignored; create it on each machine:
+
+  ```ini
+  [env:genericSTM32U031K8]
+  monitor_port = COM12
+  ```
+
+Either can be overridden on the command line with `--port` / `--baud`.
 
 ## Serial connection
 
@@ -28,10 +42,12 @@ Only one program can open a serial port at a time. Close any serial monitor befo
 Sets the board's real-time clock from the PC's clock.
 
 ```
-~/.platformio/penv/Scripts/python.exe -I tools/set_rtc.py COM12
+~/.platformio/penv/Scripts/python.exe -I tools/set_rtc.py
 ```
 
-It sends `T<YYYYMMDD-HH:MM:SS>` timed to arrive on the next whole second, then prints the board's reply, e.g. `rtc: set 20261031-23:20:24`. Local time is sent by default; add `--utc` for UTC.
+It sends `T<YYYYMMDD-HH:MM:SS>` timed to arrive on the next whole second, then prints the board's reply, e.g. `rtc: set 20261031-23:20:24`. Local time is sent by default; add `--utc` for UTC. A port can be given as the first argument instead of using `monitor_port`.
+
+Once the clock is set, the board sleeps and can't receive serial commands. Press its button first; it stays awake for 5 s after a wake or button press, and each command received restarts that window.
 
 The clock stays set through resets and reflashing. It is lost when the coin cell is removed. While the clock is unset, the LED blips for 5 ms once a second and the boot message reads `rtc: unset`.
 
@@ -42,23 +58,23 @@ You can also set the clock by hand from any serial terminal by typing the same c
 Records a serial port for a fixed time and prints what it receives.
 
 ```
-~/.platformio/penv/Scripts/python.exe -I tools/serial_capture.py COM12 15
+~/.platformio/penv/Scripts/python.exe -I tools/serial_capture.py 15
 ```
 
-Arguments are port, seconds, and an optional baud rate (default 115200).
+The argument is the capture time in seconds.
 
 ## lse_drive_timing.tcl
 
 Times how long the 32.768 kHz crystal takes to start at each of the four drive strengths, then stops the crystal and reboots the board so the firmware sees a cold start. Use it to check the crystal circuit, for example after rework or cleaning.
 
 ```
-~/.platformio/packages/tool-openocd/bin/openocd.exe -s ~/.platformio/packages/tool-openocd/openocd/scripts -f interface/stlink.cfg -c "transport select swd" -f target/stm32u0x.cfg -f tools/lse_drive_timing.tcl
+~/.platformio/packages/tool-openocd/bin/openocd.exe -c "reset_config srst_only srst_nogate connect_assert_srst" -s ~/.platformio/packages/tool-openocd/openocd/scripts -f interface/stlink.cfg -c "transport select swd" -f target/stm32u0x.cfg -f tools/lse_drive_timing.tcl
 ```
 
-A healthy board starts at every level in under about 300 ms. It needs an ST-Link connected to J3.
+A healthy board starts at every level in under about 300 ms. It needs an ST-Link connected to J3; the `reset_config` option connects under reset, which is needed because the firmware sleeps with SWD off.
 
 Running it also clears the RTC, because the clock lives in the same backup domain as the crystal settings. Run `set_rtc.py` afterwards.
 
 ## Planned
 
-- Make `set_rtc.py` friendlier: find the board's port automatically, show the clock before and after, and give clear messages when the port is busy or the board doesn't answer.
+- Make `set_rtc.py` friendlier: show the clock before and after, prompt to wake the board, and give clear messages when the port is busy or the board doesn't answer.

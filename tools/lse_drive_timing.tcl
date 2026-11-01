@@ -1,5 +1,5 @@
 # Time LSE (32.768 kHz) startup at each drive level, then cold-reset the LSE and reboot.
-# usage: openocd -f interface/stlink.cfg -c "transport select swd" -f target/stm32u0x.cfg -f tools/lse_drive_timing.tcl
+# usage: openocd -c "reset_config srst_only srst_nogate connect_assert_srst" -f interface/stlink.cfg -c "transport select swd" -f target/stm32u0x.cfg -f tools/lse_drive_timing.tcl
 # Needs backup domain write access (PWR_CR1.DBP), which the firmware leaves enabled.
 # RCC_BDCR = 0x40021090: LSEON bit 0, LSERDY bit 1, LSEDRV bits 4:3, BDRST bit 16
 
