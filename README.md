@@ -30,7 +30,7 @@ Hour Utilization Monitor: a coin-cell data logger that timestamps machine run ti
 - [x] hello world
 - [x] interface with accel, eep
 - [x] rtc setup
-- [ ] freq bracket indicate - LED/serial output current freq bracket
+- [x] freq bracket indicate - LED/serial output current freq bracket
 - [ ] bracket time - serial output time in bracket for a continuous session
 - [ ] store and retrieve - keep running tally
 - [ ] timestamp
@@ -43,14 +43,15 @@ Hour Utilization Monitor: a coin-cell data logger that timestamps machine run ti
 
 | | Used | Total | |
 |---|---:|---:|---:|
-| Flash | 42,100 B | 64 KB | 64% |
-| RAM | 2,192 B | 12 KB | 18% |
+| Flash | 44,064 B | 64 KB | 67% |
+| RAM | 2,896 B | 12 KB | 24% |
 
 ### Added
 
 - LIS2DTW12 accelerometer bring-up: WHO_AM_I check, X/Y/Z in mg over UART at 1 Hz
 - 24FC512 EEPROM bring-up: boot counter at 0x0000
 - RTC on LSE: set over UART with [tools/set_rtc.py](tools/tools.md#set_rtcpy), kept through resets and reflashing, timestamp on button print, LED blips 5 ms/s while unset
-- Sleep: MCU in Stop 2, accel in low-power mode 1 with a motion wake-up on INT1, EEPROM in standby; wakes on motion or button, flashes the LED and prints status, stays up 5 s; no sleep while the RTC is unset
+- Sleep: MCU in Stop 2, EEPROM in standby; wakes on button, flashes the LED and prints status, stays up 10 s; no sleep while the RTC is unset. Motion wake on INT1 (accel in low-power mode 1) is behind `ACC_WAKE_EN`, off for now, so the accel powers down while asleep
 - Temperature from the accel's sensor in the status line
+- Frequency brackets ([docs](docs/hum_engine_freq.md)): accel at 800 Hz, +/-8 g, Goertzel over 31.25-150 Hz on all axes every 0.64 s; off under 50 mg rms, else idle (31.25-56.25 Hz) or operating (62.5-150 Hz) by the stronger band; `hum:` line on UART and 1/2/3 LED blips per frame while awake
 

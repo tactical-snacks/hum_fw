@@ -17,10 +17,13 @@
 
 #define UART_BAUD            115200
 #define BTN_DEBOUNCE_MS      30U     // no external pull-up or RC on PA1
-#define LED_UNSET_ON_MS      5U      // clock-unset blip: 5 ms on every LED_UNSET_PERIOD_MS
-#define LED_UNSET_PERIOD_MS  1000U
+#define LED_BLIP_ON_MS       5U      // all LED patterns are 5 ms blips
+#define LED_BLIP_GAP_MS      150U    // blip spacing within a pattern
+#define LED_UNSET_PERIOD_MS  1000U   // clock unset: one blip per second
 #define LED_WAKE_MS          50U     // flash on each wake
-#define AWAKE_MS             5000U   // stay up after a wake for button presses and serial commands
+#define AWAKE_MS             10000U  // stay up after a wake for hum frames, button presses, serial commands
+#define ACC_WAKE_EN          false   // true: motion on INT1 also wakes; false: button only, accel powered down
+#define I2C_CLOCK_HZ         400000U // fast mode: drains the accel FIFO in time at 800 Hz
 #define RX_LINE_MAX          32U
 
 // LIS2DTW12 registers (datasheet DS12825 section 8)
@@ -31,22 +34,49 @@
 #define ACC_REG_CTRL3        0x22U   // ST[7:6], PP_OD, LIR, H_LACTIVE, -, SLP_MODE_SEL, SLP_MODE_1
 #define ACC_REG_CTRL4        0x23U   // INT1 pad routing, bit 5 INT1_WU
 #define ACC_REG_CTRL6        0x25U   // BW_FILT[7:6], FS[5:4], FDS, LOW_NOISE
-#define ACC_REG_OUT_X_L      0x28U   // X, Y, Z as 16-bit LE, left-justified
+#define ACC_REG_OUT_X_L      0x28U   // X, Y, Z as 16-bit LE, left-justified; FIFO head when FIFO is on
+#define ACC_REG_FIFO_CTRL    0x2EU   // FMode[7:5], FTH[4:0]
+#define ACC_REG_FIFO_SAMPLES 0x2FU   // FIFO_FTH, FIFO_OVR, Diff[5:0] unread samples
 #define ACC_REG_WAKE_UP_THS  0x34U   // SINGLE_DOUBLE_TAP, SLEEP_ON, WK_THS[5:0]
 #define ACC_REG_ALL_INT_SRC  0x3BU   // reading clears latched interrupts
 #define ACC_REG_CTRL7        0x3FU   // DRDY_PULSED, INT2_ON_INT1, INTERRUPTS_ENABLE, ...
 
 #define ACC_WHO_AM_I_VAL     0x44U
+#define ACC_CTRL1_POWER_DOWN 0x00U   // ODR off (~50 nA)
 #define ACC_CTRL1_12HZ5_LP1  0x20U   // ODR 12.5 Hz, low-power mode 1 (12-bit, ~1 uA)
+#define ACC_CTRL1_800HZ_HP   0x84U   // ODR 800 Hz, high-performance (14-bit, ~90 uA)
 #define ACC_CTRL2_SOFT_RESET 0x40U
 #define ACC_CTRL2_BDU_INC    0x0CU   // block data update, address auto-increment
 #define ACC_CTRL3_LIR        0x10U   // latch INT1 until ALL_INT_SRC is read
 #define ACC_CTRL4_INT1_WU    0x20U
 #define ACC_CTRL6_2G         0x00U   // +/-2 g, ODR/2 bandwidth, low-noise off
+#define ACC_CTRL6_HUM        0x64U   // ODR/4 bandwidth (200 Hz at 800 Hz), +/-8 g, low-noise on
 #define ACC_CTRL7_INT_EN     0x20U   // INTERRUPTS_ENABLE
+#define ACC_FIFO_BYPASS      0x00U   // FIFO off (and emptied)
+#define ACC_FIFO_CONTINUOUS  0xC0U   // newest 32 samples, oldest overwritten when full
+#define ACC_FIFO_OVR         0x40U
+#define ACC_FIFO_DIFF        0x3FU
+#define ACC_FIFO_CHUNK       16U     // samples per I2C burst (96 bytes)
 #define ACC_WU_THS           2U      // wake on motion over 2 x 31.25 mg (1/64 of FS), high-pass filtered
 #define ACC_INT_DROP_MS      200U    // INT1 drops on the next internal sample after a clear (80 ms at 12.5 Hz)
+#define ACC_SETTLE_MS        250U    // after leaving hum mode, let the wake-up filter settle before sleeping
 #define ACC_UG_PER_LSB       244     // +/-2 g: 0.244 mg per 14-bit LSB
+#define ACC_UG_PER_LSB_HUM   976     // +/-8 g: 0.976 mg per 14-bit LSB (first machine test peaked at 4 g)
+#define ACC_FULL_SCALE       8191    // 14-bit max count: a sample at this level has clipped
+#define HUM_FIRST_MS         20U     // after hum_start, ~16 samples (FIFO holds 32) for the wake status line
+
+// engine hum brackets (docs/hum_engine_freq.md): Goertzel over 128-sample blocks at 800 Hz,
+// bins 5..24 = 31.25..150 Hz in 6.25 Hz steps, all three axes; a frame is 4 blocks (512 samples, 0.64 s)
+#define HUM_N                128U
+#define HUM_BLOCKS           4U
+#define HUM_BIN_FIRST        5U      // 31.25 Hz
+#define HUM_NBINS            20U     // through bin 24, 150 Hz
+#define HUM_BIN_IDLE_HI      9U      // 31.25..56.25 Hz: idle, 30-55 Hz (first machine test idled at 37.5-43.75)
+                                     // 62.5..150 Hz: operating, 65-150 Hz (62.5 is nearer operating)
+#define HUM_OFF_DMG          500U    // under 50.0 mg rms across 31.25-150 Hz reads as off (rest ~2, machine 600+)
+#define HUM_BRACKET_OFF      1U
+#define HUM_BRACKET_IDLE     2U
+#define HUM_BRACKET_OP       3U
 
 // 24FC512: 64 KB, 2-byte address, 128-byte pages, 5 ms max write cycle, WP = GND
 // no sleep command: it drops to standby (1 uA max) whenever the bus is idle and no write is running
@@ -68,6 +98,24 @@ static volatile bool btn_woke = false;      // set by the PA1 / PA0 EXTI handler
 static volatile bool acc_woke = false;
 static bool btn_down = false;               // debounced button state
 static uint32_t btn_stable_ms = 0;
+static uint8_t led_blips = 0;               // blips still to show in the current pattern
+static uint32_t led_next_ms = 0;            // when the next blip starts
+
+// 2 cos(2 pi k / 128) in Q14, k = 5..24
+static const int16_t hum_coeff[HUM_NBINS] = {
+  31786, 31357, 30853, 30274, 29622, 28899, 28106, 27246, 26320, 25330,
+  24279, 23170, 22006, 20788, 19520, 18205, 16846, 15447, 14010, 12540
+};
+static bool hum_on = false;
+static bool hum_seeded = false;             // hum_dc holds a real sample since hum_start
+static int32_t hum_s1[3][HUM_NBINS], hum_s2[3][HUM_NBINS];   // Goertzel state per axis and bin
+static int32_t hum_dc[3], hum_sum[3];       // previous frame mean per axis, and this frame's running sum
+static uint64_t hum_pow[HUM_NBINS];         // bin power over the frame, summed across axes
+static uint16_t hum_n = 0;                  // samples into the current block
+static uint8_t hum_block = 0;               // blocks into the current frame
+static int32_t hum_peak = 0;                // largest |count| this frame, gravity included
+static bool hum_ovr = false;                // FIFO overran this frame: samples were lost
+static int16_t hum_last[3];                 // newest sample, for the status line while in hum mode
 
 
 // replaces the variant's empty weak default; runs before setup() and again after each Stop 2 wake
@@ -397,6 +445,195 @@ static bool rtc_set(const char *s) {
 }
 
 
+static uint32_t isqrt64(uint64_t v) {
+  uint64_t r = 0, bit = 1ULL << 62;
+
+  while (bit > v) {
+    bit >>= 2;
+  }
+  while (bit) {
+    if (v >= r + bit) {
+      v -= r + bit;
+      r = (r >> 1) + bit;
+    } else {
+      r >>= 1;
+    }
+    bit >>= 2;
+  }
+  return (uint32_t)r;
+}
+
+// rms in tenths of a mg for frame bin power p: a sine of amplitude A counts gives |X|^2 = (A N / 2)^2,
+// so rms = sqrt(2 |X|^2) / N counts, averaged over the frame's blocks
+static uint32_t hum_dmg(uint64_t p) {
+  return (uint64_t)isqrt64(2 * p / HUM_BLOCKS) * ACC_UG_PER_LSB_HUM / (HUM_N * 100);
+}
+
+static void hum_reset(void) {
+  memset(hum_s1, 0, sizeof(hum_s1));
+  memset(hum_s2, 0, sizeof(hum_s2));
+  memset(hum_pow, 0, sizeof(hum_pow));
+  memset(hum_sum, 0, sizeof(hum_sum));
+  hum_n = 0;
+  hum_block = 0;
+  hum_peak = 0;
+  hum_ovr = false;
+}
+
+// frame done: off by level alone, otherwise the stronger band picks the bracket; print it, queue its blips
+static void hum_frame(void) {
+  uint64_t idle = 0, op = 0, best = 0;
+  uint8_t best_bin = 0;
+
+  for (uint8_t b = 0; b < HUM_NBINS; b++) {
+    uint8_t k = HUM_BIN_FIRST + b;
+
+    if (k <= HUM_BIN_IDLE_HI) {
+      idle += hum_pow[b];
+    } else {
+      op += hum_pow[b];
+    }
+    if (hum_pow[b] > best) {
+      best = hum_pow[b];
+      best_bin = k;
+    }
+  }
+
+  uint32_t total_dmg = hum_dmg(idle + op);
+  uint8_t bracket = HUM_BRACKET_OFF;
+  if (total_dmg >= HUM_OFF_DMG) {
+    bracket = idle > op ? HUM_BRACKET_IDLE : HUM_BRACKET_OP;
+  }
+  static const char *const names[] = {"", "off", "idle", "operating"};
+  uint32_t f_x100 = best_bin * 80000U / HUM_N;      // bin k is k * 800 / 128 Hz
+  uint32_t idle_dmg = hum_dmg(idle), op_dmg = hum_dmg(op);
+  uint32_t peak_mg = (uint32_t)hum_peak * ACC_UG_PER_LSB_HUM / 1000;
+
+  uart.printf("hum: %u %-9s  f %3lu.%02lu Hz  idle %lu.%lu  op %lu.%lu  all %lu.%lu mg rms  peak %lu mg%s%s\r\n",
+              bracket, names[bracket], f_x100 / 100, f_x100 % 100, idle_dmg / 10, idle_dmg % 10,
+              op_dmg / 10, op_dmg % 10, total_dmg / 10, total_dmg % 10, peak_mg,
+              hum_peak >= ACC_FULL_SCALE ? "  CLIPPED" : "", hum_ovr ? "  OVERRUN" : "");
+
+  // while the clock is unset its 1/s blip owns the LED, so a bracket-1 blip can't be mistaken for it
+  if (rtc_is_set()) {
+    led_blips = bracket;
+    led_next_ms = millis();
+  }
+  memset(hum_pow, 0, sizeof(hum_pow));
+  hum_block = 0;
+  hum_peak = 0;
+  hum_ovr = false;
+}
+
+// one 800 Hz sample (14-bit counts per axis) through every bin's Goertzel filter
+static void hum_sample(const int16_t v[3]) {
+  if (!hum_seeded) {
+    for (uint8_t a = 0; a < 3; a++) {
+      hum_dc[a] = v[a];
+    }
+    hum_seeded = true;
+  }
+  for (uint8_t a = 0; a < 3; a++) {
+    int32_t abs_v = v[a] < 0 ? -v[a] : v[a];
+    if (abs_v > hum_peak) {
+      hum_peak = abs_v;
+    }
+    hum_sum[a] += v[a];
+    // removing the previous frame's mean keeps gravity out of the fixed-point state; it's
+    // constant across every block, so it doesn't leak into the bins
+    int32_t x = v[a] - hum_dc[a];
+    for (uint8_t b = 0; b < HUM_NBINS; b++) {
+      int32_t s0 = x + (int32_t)(((int64_t)hum_coeff[b] * hum_s1[a][b]) >> 14) - hum_s2[a][b];
+      hum_s2[a][b] = hum_s1[a][b];
+      hum_s1[a][b] = s0;
+    }
+  }
+  if (++hum_n < HUM_N) {
+    return;
+  }
+
+  // end of block: |X_k|^2 = s1^2 + s2^2 - coeff s1 s2
+  for (uint8_t a = 0; a < 3; a++) {
+    for (uint8_t b = 0; b < HUM_NBINS; b++) {
+      int64_t s1 = hum_s1[a][b], s2 = hum_s2[a][b];
+      int64_t p = s1 * s1 + s2 * s2 - (((int64_t)hum_coeff[b] * s1) >> 14) * s2;
+      hum_pow[b] += p > 0 ? p : 0;
+      hum_s1[a][b] = 0;
+      hum_s2[a][b] = 0;
+    }
+  }
+  hum_n = 0;
+  if (++hum_block < HUM_BLOCKS) {
+    return;
+  }
+
+  for (uint8_t a = 0; a < 3; a++) {
+    hum_dc[a] = hum_sum[a] / (int32_t)(HUM_N * HUM_BLOCKS);
+    hum_sum[a] = 0;
+  }
+  hum_frame();
+}
+
+// drain the FIFO; at 800 Hz it holds 40 ms, so this must run at least that often
+static void hum_service(void) {
+  uint8_t st, buf[ACC_FIFO_CHUNK * 6];
+
+  if (!hum_on || !acc_read(ACC_REG_FIFO_SAMPLES, &st, 1)) {
+    return;
+  }
+  if (st & ACC_FIFO_OVR) {
+    hum_ovr = true;
+  }
+  uint8_t n = st & ACC_FIFO_DIFF;
+  while (n > 0) {
+    uint8_t chunk = n < ACC_FIFO_CHUNK ? n : ACC_FIFO_CHUNK;
+    // reads past 0x2D wrap to 0x28, so one burst pops several samples
+    if (!acc_read(ACC_REG_OUT_X_L, buf, chunk * 6)) {
+      return;
+    }
+    for (uint8_t i = 0; i < chunk; i++) {
+      for (uint8_t a = 0; a < 3; a++) {
+        hum_last[a] = (int16_t)(buf[i * 6 + a * 2 + 1] << 8 | buf[i * 6 + a * 2]) >> 2;
+      }
+      hum_sample(hum_last);
+    }
+    n -= chunk;
+  }
+}
+
+// awake: 800 Hz high-performance capture into the FIFO, motion interrupt off
+static void hum_start(void) {
+  if (!acc_ok) {
+    return;
+  }
+  acc_write(ACC_REG_CTRL4, 0);
+  acc_write(ACC_REG_FIFO_CTRL, ACC_FIFO_BYPASS);
+  acc_write(ACC_REG_CTRL6, ACC_CTRL6_HUM);
+  acc_write(ACC_REG_CTRL1, ACC_CTRL1_800HZ_HP);
+  acc_write(ACC_REG_FIFO_CTRL, ACC_FIFO_CONTINUOUS);
+  hum_reset();
+  hum_seeded = false;
+  hum_on = true;
+}
+
+// back to the low-power motion-wake setup used while asleep, or powered down if motion wake is off
+static void hum_stop(void) {
+  if (!hum_on) {
+    return;
+  }
+  hum_on = false;
+  acc_write(ACC_REG_FIFO_CTRL, ACC_FIFO_BYPASS);
+  if (!ACC_WAKE_EN) {
+    acc_write(ACC_REG_CTRL1, ACC_CTRL1_POWER_DOWN);
+    return;
+  }
+  acc_write(ACC_REG_CTRL1, ACC_CTRL1_12HZ5_LP1);
+  acc_write(ACC_REG_CTRL6, ACC_CTRL6_2G);
+  acc_write(ACC_REG_CTRL4, ACC_CTRL4_INT1_WU);
+  delay(ACC_SETTLE_MS);
+}
+
+
 static void btn_isr(void) {
   btn_woke = true;
 }
@@ -449,6 +686,7 @@ void setup() {
   Wire.setSDA(I2C_SDA_PIN);
   Wire.setSCL(I2C_SCL_PIN);
   Wire.begin();
+  Wire.setClock(I2C_CLOCK_HZ);
 
   uart.println("hello");
   uart.println(lse_ok ? "lse: ok" : "lse: FAIL, MSI untrimmed");
@@ -468,7 +706,10 @@ void setup() {
   uart.println(eep_ok ? "eep: ok" : "eep: FAIL");
 
   attachInterrupt(digitalPinToInterrupt(BTN_PIN), btn_isr, FALLING);
-  attachInterrupt(digitalPinToInterrupt(ACC_INT1_PIN), acc_isr, RISING);
+  if (ACC_WAKE_EN) {
+    attachInterrupt(digitalPinToInterrupt(ACC_INT1_PIN), acc_isr, RISING);
+  }
+  hum_start();
 }
 
 // true once per press: the pin must read the new level for BTN_DEBOUNCE_MS before it counts
@@ -485,14 +726,30 @@ static bool btn_pressed(void) {
   return false;
 }
 
-// clock unset: 5 ms blip each second (swap for Flasher's portable branch once it's public)
+// blip patterns: clock unset = 1 blip per second, otherwise each hum frame queues its bracket number
+// (swap for Flasher's portable branch once it's public)
 static void led_service(void) {
-  static bool blip = false;
-  bool on = !rtc_is_set() && millis() % LED_UNSET_PERIOD_MS < LED_UNSET_ON_MS;
+  static bool lit = false;
+  static uint32_t lit_ms = 0, unset_ms = 0;
+  uint32_t now = millis();
 
-  if (on != blip) {
-    blip = on;
-    digitalWrite(LED_PIN, on ? HIGH : LOW);
+  if (!rtc_is_set() && now - unset_ms >= LED_UNSET_PERIOD_MS) {
+    unset_ms = now;
+    led_blips = 1;
+    led_next_ms = now;
+  }
+  // timed from when the blip actually started, so a slow loop pass stretches it rather than skipping it
+  if (lit) {
+    if (now - lit_ms >= LED_BLIP_ON_MS) {
+      digitalWrite(LED_PIN, LOW);
+      lit = false;
+      led_next_ms = lit_ms + LED_BLIP_GAP_MS;
+    }
+  } else if (led_blips > 0 && (int32_t)(now - led_next_ms) >= 0) {
+    digitalWrite(LED_PIN, HIGH);
+    lit = true;
+    lit_ms = now;
+    led_blips--;
   }
 }
 
@@ -536,7 +793,17 @@ static void print_status(const char *why) {
   if (!rtc_format(ts, sizeof(ts))) {
     strcpy(ts, "rtc unset");
   }
-  if (acc_ok && acc_read_mg(&x, &y, &z) && acc_read_temp_dc(&dc)) {
+  // in hum mode the output registers are the FIFO head, so use the newest drained sample instead
+  bool got = false;
+  if (hum_on) {
+    x = (int32_t)hum_last[0] * ACC_UG_PER_LSB_HUM / 1000;
+    y = (int32_t)hum_last[1] * ACC_UG_PER_LSB_HUM / 1000;
+    z = (int32_t)hum_last[2] * ACC_UG_PER_LSB_HUM / 1000;
+    got = true;
+  } else {
+    got = acc_ok && acc_read_mg(&x, &y, &z);
+  }
+  if (got && acc_read_temp_dc(&dc)) {
     uart.printf("%s  %s  x=%5ld y=%5ld z=%5ld mg  temp %s%ld.%ld C  vcc %lu mV\r\n", ts, why,
                 x, y, z, dc < 0 ? "-" : "", labs(dc) / 10, labs(dc) % 10, vcc);
   } else {
@@ -549,6 +816,7 @@ void loop() {
   static uint32_t awake_ms = 0;   // start of the current awake window
 
   led_service();
+  hum_service();
   if (rx_service()) {
     awake_ms = millis();
   }
@@ -568,6 +836,9 @@ void loop() {
     return;
   }
 
+  hum_stop();
+  digitalWrite(LED_PIN, LOW);     // in case sleep lands mid-blip
+  led_blips = 0;
   mcu_sleep();
 
   const char *why = btn_woke ? "wake btn" : "wake acc";
@@ -581,6 +852,9 @@ void loop() {
   digitalWrite(LED_PIN, HIGH);
   delay(LED_WAKE_MS);
   digitalWrite(LED_PIN, LOW);
+  hum_start();
+  delay(HUM_FIRST_MS);
+  hum_service();
   print_status(why);
   awake_ms = millis();
 }
