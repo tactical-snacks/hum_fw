@@ -14,9 +14,9 @@ Source: phone audio
 
 ## Brackets (1x)
 
-- **Idle:** 40–55 Hz
-- **Operating:** 65–150 Hz
-- **Off:** below idle bracket
+1. **Off:** below idle bracket
+2. **Idle:** 8-11 Hz
+3. **Operating:** 30–120 Hz
 
 ## Firmware notes
 
