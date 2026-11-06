@@ -21,8 +21,9 @@
 #define LED_BLIP_GAP_MS      150U    // blip spacing within a pattern
 #define LED_UNSET_PERIOD_MS  1000U   // clock unset: one blip per second
 #define LED_WAKE_MS          50U     // flash on each wake
-#define AWAKE_MS             10000U  // stay up after a wake for hum frames, button presses, serial commands
+#define AWAKE_MS             10000U  // stay up after a wake for button presses and serial commands
 #define ACC_WAKE_EN          false   // true: motion on INT1 also wakes; false: button only, accel powered down
+#define HUM_EN               false   // true: bracket detection while awake (hum: lines, LED blips); false: off
 #define I2C_CLOCK_HZ         400000U // fast mode: drains the accel FIFO in time at 800 Hz
 #define RX_LINE_MAX          32U
 
@@ -73,16 +74,28 @@
 #define HUM_NBINS            20U     // through bin 24, 150 Hz
 #define HUM_BIN_IDLE_HI      9U      // 31.25..56.25 Hz: idle, 30-55 Hz (first machine test idled at 37.5-43.75)
                                      // 62.5..150 Hz: operating, 65-150 Hz (62.5 is nearer operating)
-#define HUM_OFF_DMG          500U    // under 50.0 mg rms across 31.25-150 Hz reads as off (rest ~2, machine 600+)
+// amplitude gate: the winning band's rms must reach a line from 700 mg at 30 Hz down to 200 mg at 100 Hz
+// (flat outside), set at the frequency of that band's strongest bin; below it reads as off
+#define HUM_GATE_LO_HZ       30U
+#define HUM_GATE_LO_DMG      7000U   // tenths of a mg
+#define HUM_GATE_HI_HZ       100U
+#define HUM_GATE_HI_DMG      2000U
+#define HUM_CONFIRM          2U      // consecutive frames that must agree before the bracket changes
+#define HUM_BRACKET_NONE     0U      // no two frames have agreed yet since the wake
 #define HUM_BRACKET_OFF      1U
 #define HUM_BRACKET_IDLE     2U
 #define HUM_BRACKET_OP       3U
 
 // 24FC512: 64 KB, 2-byte address, 128-byte pages, 5 ms max write cycle, WP = GND
 // no sleep command: it drops to standby (1 uA max) whenever the bus is idle and no write is running
+#define EEP_SIZE             65536UL
 #define EEP_PAGE_SIZE        128U
+#define EEP_ERASE_CONFIRM_MS 10000U  // after the ERASE command, a button press within this long erases
 #define EEP_WRITE_TIMEOUT_MS 10U
-#define EEP_ADDR_BOOT_COUNT  0x0000U  // uint32_t LE, 0xFFFFFFFF when erased
+// EEPROM map: each counter is a uint32_t LE, 0xFFFFFFFF when erased (eep_read_count reads that as 0)
+#define EEP_ADDR_BOOT_COUNT  0x0000U  // boots
+#define EEP_ADDR_IDLE_S      0x0004U  // total idle duration, seconds (docs/state_machine.md)
+#define EEP_ADDR_OP_S        0x0008U  // total operating duration, seconds
 
 
 // the variant's default Serial is USART4 on PA0/PA1 (ACC_INT1/BTN), so use USART1
@@ -98,6 +111,8 @@ static volatile bool btn_woke = false;      // set by the PA1 / PA0 EXTI handler
 static volatile bool acc_woke = false;
 static bool btn_down = false;               // debounced button state
 static uint32_t btn_stable_ms = 0;
+static bool eep_erase_armed = false;        // ERASE received, waiting for the button to accept
+static uint32_t eep_erase_ms = 0;           // when it was received
 static uint8_t led_blips = 0;               // blips still to show in the current pattern
 static uint32_t led_next_ms = 0;            // when the next blip starts
 
@@ -113,6 +128,9 @@ static int32_t hum_dc[3], hum_sum[3];       // previous frame mean per axis, and
 static uint64_t hum_pow[HUM_NBINS];         // bin power over the frame, summed across axes
 static uint16_t hum_n = 0;                  // samples into the current block
 static uint8_t hum_block = 0;               // blocks into the current frame
+static uint8_t hum_state = HUM_BRACKET_NONE;  // confirmed bracket
+static uint8_t hum_cand = HUM_BRACKET_NONE; // bracket waiting for confirmation, and its run of frames
+static uint8_t hum_cand_n = 0;
 static int32_t hum_peak = 0;                // largest |count| this frame, gravity included
 static bool hum_ovr = false;                // FIFO overran this frame: samples were lost
 static int16_t hum_last[3];                 // newest sample, for the status line while in hum mode
@@ -324,6 +342,26 @@ static bool eep_init(void) {
   return true;
 }
 
+// back to the erased state (all 0xFF), page by page with read-back; ~6 s for 64 KB
+static bool eep_erase(void) {
+  uint8_t buf[EEP_PAGE_SIZE];
+
+  for (uint32_t addr = 0; addr < EEP_SIZE; addr += EEP_PAGE_SIZE) {
+    memset(buf, 0xFF, sizeof(buf));
+    if (!eep_write(addr, buf, sizeof(buf)) || !eep_read(addr, buf, sizeof(buf))) {
+      uart.printf("eep: erase failed at 0x%04lX\r\n", addr);
+      return false;
+    }
+    for (uint8_t i = 0; i < sizeof(buf); i++) {
+      if (buf[i] != 0xFF) {
+        uart.printf("eep: erase verify failed at 0x%04lX\r\n", addr + i);
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 
 // VDDA = VCC = coin cell (R2 = 0R, no diode); VREFINT is factory-calibrated at VDDA = 3.0 V
 static uint32_t vcc_read_mv(void) {
@@ -480,43 +518,81 @@ static void hum_reset(void) {
   hum_ovr = false;
 }
 
-// frame done: off by level alone, otherwise the stronger band picks the bracket; print it, queue its blips
+// gate level in tenths of a mg at f_x100 (hundredths of a Hz)
+static uint32_t hum_gate_dmg(uint32_t f_x100) {
+  if (f_x100 < HUM_GATE_LO_HZ * 100) {
+    f_x100 = HUM_GATE_LO_HZ * 100;
+  } else if (f_x100 > HUM_GATE_HI_HZ * 100) {
+    f_x100 = HUM_GATE_HI_HZ * 100;
+  }
+  return HUM_GATE_LO_DMG - (f_x100 - HUM_GATE_LO_HZ * 100) * (HUM_GATE_LO_DMG - HUM_GATE_HI_DMG) /
+                           ((HUM_GATE_HI_HZ - HUM_GATE_LO_HZ) * 100);
+}
+
+// the bracket only changes after HUM_CONFIRM frames in a row agree on a new one
+static void hum_confirm(uint8_t raw) {
+  if (raw == hum_state) {
+    hum_cand_n = 0;
+    return;
+  }
+  if (raw != hum_cand) {
+    hum_cand = raw;
+    hum_cand_n = 0;
+  }
+  if (++hum_cand_n >= HUM_CONFIRM) {
+    hum_state = raw;
+    hum_cand_n = 0;
+  }
+}
+
+// frame done: the stronger band picks idle or operating if it clears the gate, else off; confirm it,
+// print it, queue the confirmed bracket's blips
 static void hum_frame(void) {
-  uint64_t idle = 0, op = 0, best = 0;
-  uint8_t best_bin = 0;
+  uint64_t idle = 0, op = 0, idle_best = 0, op_best = 0;
+  uint8_t idle_bin = 0, op_bin = 0;
 
   for (uint8_t b = 0; b < HUM_NBINS; b++) {
     uint8_t k = HUM_BIN_FIRST + b;
 
     if (k <= HUM_BIN_IDLE_HI) {
       idle += hum_pow[b];
+      if (hum_pow[b] > idle_best) {
+        idle_best = hum_pow[b];
+        idle_bin = k;
+      }
     } else {
       op += hum_pow[b];
-    }
-    if (hum_pow[b] > best) {
-      best = hum_pow[b];
-      best_bin = k;
+      if (hum_pow[b] > op_best) {
+        op_best = hum_pow[b];
+        op_bin = k;
+      }
     }
   }
 
-  uint32_t total_dmg = hum_dmg(idle + op);
-  uint8_t bracket = HUM_BRACKET_OFF;
-  if (total_dmg >= HUM_OFF_DMG) {
-    bracket = idle > op ? HUM_BRACKET_IDLE : HUM_BRACKET_OP;
+  bool idle_wins = idle > op;
+  uint32_t f_x100 = (idle_wins ? idle_bin : op_bin) * 80000U / HUM_N;   // bin k is k * 800 / 128 Hz
+  uint32_t idle_dmg = hum_dmg(idle), op_dmg = hum_dmg(op), total_dmg = hum_dmg(idle + op);
+  uint32_t gate_dmg = hum_gate_dmg(f_x100);
+  uint8_t raw = HUM_BRACKET_OFF;
+  if ((idle_wins ? idle_dmg : op_dmg) >= gate_dmg) {
+    raw = idle_wins ? HUM_BRACKET_IDLE : HUM_BRACKET_OP;
   }
+  hum_confirm(raw);
+  // until two frames agree there's nothing confirmed, so show what this frame sensed
+  uint8_t shown = hum_state != HUM_BRACKET_NONE ? hum_state : raw;
+
   static const char *const names[] = {"", "off", "idle", "operating"};
-  uint32_t f_x100 = best_bin * 80000U / HUM_N;      // bin k is k * 800 / 128 Hz
-  uint32_t idle_dmg = hum_dmg(idle), op_dmg = hum_dmg(op);
   uint32_t peak_mg = (uint32_t)hum_peak * ACC_UG_PER_LSB_HUM / 1000;
 
-  uart.printf("hum: %u %-9s  f %3lu.%02lu Hz  idle %lu.%lu  op %lu.%lu  all %lu.%lu mg rms  peak %lu mg%s%s\r\n",
-              bracket, names[bracket], f_x100 / 100, f_x100 % 100, idle_dmg / 10, idle_dmg % 10,
-              op_dmg / 10, op_dmg % 10, total_dmg / 10, total_dmg % 10, peak_mg,
+  uart.printf("hum: %u %-9s  raw %u  f %3lu.%02lu Hz  idle %lu.%lu  op %lu.%lu  all %lu.%lu  gate %lu.%lu mg rms"
+              "  peak %lu mg%s%s\r\n",
+              shown, names[shown], raw, f_x100 / 100, f_x100 % 100, idle_dmg / 10, idle_dmg % 10,
+              op_dmg / 10, op_dmg % 10, total_dmg / 10, total_dmg % 10, gate_dmg / 10, gate_dmg % 10, peak_mg,
               hum_peak >= ACC_FULL_SCALE ? "  CLIPPED" : "", hum_ovr ? "  OVERRUN" : "");
 
   // while the clock is unset its 1/s blip owns the LED, so a bracket-1 blip can't be mistaken for it
   if (rtc_is_set()) {
-    led_blips = bracket;
+    led_blips = shown;
     led_next_ms = millis();
   }
   memset(hum_pow, 0, sizeof(hum_pow));
@@ -574,7 +650,8 @@ static void hum_sample(const int16_t v[3]) {
   hum_frame();
 }
 
-// drain the FIFO; at 800 Hz it holds 40 ms, so this must run at least that often
+// drain the FIFO; at 800 Hz it holds 40 ms, so this must run at least that often. hum_last always
+// gets the newest sample for the status line; the bracket analysis only runs with HUM_EN
 static void hum_service(void) {
   uint8_t st, buf[ACC_FIFO_CHUNK * 6];
 
@@ -595,7 +672,9 @@ static void hum_service(void) {
       for (uint8_t a = 0; a < 3; a++) {
         hum_last[a] = (int16_t)(buf[i * 6 + a * 2 + 1] << 8 | buf[i * 6 + a * 2]) >> 2;
       }
-      hum_sample(hum_last);
+      if (HUM_EN) {
+        hum_sample(hum_last);
+      }
     }
     n -= chunk;
   }
@@ -613,6 +692,9 @@ static void hum_start(void) {
   acc_write(ACC_REG_FIFO_CTRL, ACC_FIFO_CONTINUOUS);
   hum_reset();
   hum_seeded = false;
+  hum_state = HUM_BRACKET_NONE;   // each wake decides from its own frames, not a default
+  hum_cand = HUM_BRACKET_NONE;
+  hum_cand_n = 0;
   hum_on = true;
 }
 
@@ -753,7 +835,9 @@ static void led_service(void) {
   }
 }
 
-// line commands on UART RX: T<YYYYMMDD-HH:MM:SS> sets the clock; returns true if a line arrived
+// line commands on UART RX; returns true if a line arrived
+//   T<YYYYMMDD-HH:MM:SS>  set the clock
+//   ERASE                 erase the whole EEPROM once the button is pressed to accept
 static bool rx_service(void) {
   static char line[RX_LINE_MAX];
   static uint8_t n = 0;
@@ -775,7 +859,11 @@ static bool rx_service(void) {
     line[n] = '\0';
     n = 0;
     got = true;
-    if (line[0] == 'T' && rtc_set(line + 1) && rtc_format(ts, sizeof(ts))) {
+    if (strcmp(line, "ERASE") == 0) {
+      eep_erase_armed = true;
+      eep_erase_ms = millis();
+      uart.printf("eep: press the button within %u s to erase all 64 KB\r\n", EEP_ERASE_CONFIRM_MS / 1000);
+    } else if (line[0] == 'T' && rtc_set(line + 1) && rtc_format(ts, sizeof(ts))) {
       uart.printf("rtc: set %s\r\n", ts);
     } else {
       uart.printf("rtc: bad command '%s'\r\n", line);
@@ -821,8 +909,22 @@ void loop() {
     awake_ms = millis();
   }
   if (btn_pressed()) {
-    print_status("wake btn");
+    if (eep_erase_armed) {
+      eep_erase_armed = false;
+      uart.println("eep: erasing...");
+      uint32_t start = millis();
+      if (eep_erase()) {
+        uart.printf("eep: erased in %lu ms\r\n", millis() - start);
+      }
+      hum_reset();                // the FIFO overran during the erase; start a clean frame
+    } else {
+      print_status("wake btn");
+    }
     awake_ms = millis();
+  }
+  if (eep_erase_armed && millis() - eep_erase_ms >= EEP_ERASE_CONFIRM_MS) {
+    eep_erase_armed = false;
+    uart.println("eep: erase cancelled, no button press");
   }
   // motion while awake: just re-arm INT1, don't extend the window
   if (acc_woke) {

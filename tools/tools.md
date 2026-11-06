@@ -47,11 +47,17 @@ Sets the board's real-time clock from the PC's clock.
 
 It sends `T<YYYYMMDD-HH:MM:SS>` timed to arrive on the next whole second, then prints the board's reply, e.g. `rtc: set 20261031-23:20:24`. Local time is sent by default; add `--utc` for UTC. A port can be given as the first argument instead of using `monitor_port`.
 
-Once the clock is set, the board sleeps and can't receive serial commands. Press its button first; it stays awake for 5 s after a wake or button press, and each command received restarts that window.
+Once the clock is set, the board sleeps and can't receive serial commands. Press its button first; it stays awake for 10 s after a wake or button press, and each command received restarts that window.
 
 The clock stays set through resets and reflashing. It is lost when the coin cell is removed. While the clock is unset, the LED blips for 5 ms once a second and the boot message reads `rtc: unset`.
 
 You can also set the clock by hand from any serial terminal by typing the same command, e.g. `T20261031-14:05:00` followed by Enter.
+
+## Erasing the EEPROM
+
+Type `ERASE` followed by Enter in a serial terminal while the board is awake. The board replies `eep: press the button within 10 s to erase all 64 KB`; press the button to accept. It writes every byte back to 0xFF and reads each page back, which takes about 6 s, then prints `eep: erased in … ms`. With no press in 10 s it prints `eep: erase cancelled, no button press` and nothing changes.
+
+This also resets the boot count, so the next boot reads `eep: boot count 1`. The RTC is not affected.
 
 ## serial_capture.py
 

@@ -23,6 +23,7 @@ Hour Utilization Monitor: a coin-cell data logger that timestamps machine run ti
   - [LIS2DTW12](docs/STMicro%20LIS2DTW12TR%20Datasheet.pdf)
   - [24FC512](docs/Microchip%2024FC512%20Datasheet.pdf)
 - [Engine frequency brackets](docs/hum_engine_freq.md): idle, operating, and off bands for run detection
+- [State machine](docs/state_machine.md): sleep, duration tracking and EEPROM writes for each state change
 - [Engine recordings](docs/recording.zip): WAV clips of cranking, cold idle, transition, and high RPM
 - [Bench tools](tools/tools.md): setting the RTC, serial capture, crystal startup test
 
@@ -43,8 +44,8 @@ Hour Utilization Monitor: a coin-cell data logger that timestamps machine run ti
 
 | | Used | Total | |
 |---|---:|---:|---:|
-| Flash | 44,064 B | 64 KB | 67% |
-| RAM | 2,896 B | 12 KB | 24% |
+| Flash | 43,056 B | 64 KB | 66% |
+| RAM | 2,884 B | 12 KB | 23% |
 
 ### Added
 
@@ -53,5 +54,7 @@ Hour Utilization Monitor: a coin-cell data logger that timestamps machine run ti
 - RTC on LSE: set over UART with [tools/set_rtc.py](tools/tools.md#set_rtcpy), kept through resets and reflashing, timestamp on button print, LED blips 5 ms/s while unset
 - Sleep: MCU in Stop 2, EEPROM in standby; wakes on button, flashes the LED and prints status, stays up 10 s; no sleep while the RTC is unset. Motion wake on INT1 (accel in low-power mode 1) is behind `ACC_WAKE_EN`, off for now, so the accel powers down while asleep
 - Temperature from the accel's sensor in the status line
-- Frequency brackets ([docs](docs/hum_engine_freq.md)): accel at 800 Hz, +/-8 g, Goertzel over 31.25-150 Hz on all axes every 0.64 s; off under 50 mg rms, else idle (31.25-56.25 Hz) or operating (62.5-150 Hz) by the stronger band; `hum:` line on UART and 1/2/3 LED blips per frame while awake
+- Frequency brackets ([docs](docs/hum_engine_freq.md)): accel at 800 Hz, +/-8 g, Goertzel over 31.25-150 Hz on all axes every 0.64 s; the stronger band picks idle (31.25-56.25 Hz) or operating (62.5-150 Hz) if its rms clears a sloped gate (700 mg at 30 Hz to 200 mg at 100 Hz), else off; the bracket changes after 2 agreeing frames; `hum:` line on UART and 1/2/3 LED blips per frame while awake. Behind `HUM_EN`, off for now
+- EEPROM erase: `ERASE` over UART, accepted by a button press within 10 s ([tools.md](tools/tools.md#erasing-the-eeprom))
+- EEPROM map in `main.cpp`: idle and operating duration totals (seconds) at 0x0004 and 0x0008, not written yet
 
