@@ -32,6 +32,7 @@
                                      // lines and per-frame blips (bench); the state machine measures either way
 #define SM_LIGHT_SLEEP_S     60U     // light sleep (idle, operating): the RTC timer wakes it this often to measure
 #define HUM_MAX_FRAMES       5U      // a measurement stops once 2 frames agree, or after this many (3.2 s)
+#define DBG_EN               true    // true: DBG lines for each sample, sleep and wake (field testing)
 #define I2C_CLOCK_HZ         400000U // fast mode: drains the accel FIFO in time at 800 Hz
 #define RX_LINE_MAX          32U
 
@@ -1003,6 +1004,23 @@ static void print_status(void) {
 }
 
 
+// timestamped "DBG ..." line when DBG_EN is on
+static void dbg(const char *fmt, ...) {
+  char ts[18], msg[40];
+  va_list ap;
+
+  if (!DBG_EN) {
+    return;
+  }
+  va_start(ap, fmt);
+  vsnprintf(msg, sizeof(msg), fmt, ap);
+  va_end(ap);
+  if (!rtc_format(ts, sizeof(ts))) {
+    strcpy(ts, "rtc unset");
+  }
+  uart.printf("%s DBG %s\r\n", ts, msg);
+}
+
 // add the time spent in the state being left (idle or operating) to its EEPROM total
 static void sm_store(uint8_t state, uint32_t now) {
   uint16_t addr = state == HUM_BRACKET_IDLE ? EEP_ADDR_IDLE_S : EEP_ADDR_OP_S;
@@ -1037,6 +1055,7 @@ static void sm_cycle(void) {
   uint32_t now;
   char ts[18];
 
+  dbg("sampled %s in %u", next == HUM_BRACKET_NONE ? "undecided" : hum_names[next], hum_frames);
   if (next == HUM_BRACKET_NONE || next == sm_state || !rtc_now_s(&now)) {
     return;
   }
@@ -1054,6 +1073,7 @@ static void sm_cycle(void) {
 static void sm_sleep(void) {
   bool deep = sm_state == HUM_BRACKET_OFF;
 
+  dbg("sleep %s", deep ? "deep" : "light");
   hum_stop(deep && ACC_WAKE_EN);
   rtc_woke = false;
   if (!deep) {
@@ -1065,6 +1085,7 @@ static void sm_sleep(void) {
   __HAL_RTC_WRITEPROTECTION_DISABLE(&hrtc);
   HAL_RTC_WaitForSynchro(&hrtc);
   __HAL_RTC_WRITEPROTECTION_ENABLE(&hrtc);
+  dbg("wake %s", btn_woke ? "btn" : acc_woke ? "motion" : rtc_woke ? "timer" : "?");
 }
 
 

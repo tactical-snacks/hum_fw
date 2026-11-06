@@ -44,7 +44,7 @@ Hour Utilization Monitor: a coin-cell data logger that timestamps machine run ti
 
 | | Used | Total | |
 |---|---:|---:|---:|
-| Flash | 46,368 B | 64 KB | 71% |
+| Flash | 46,752 B | 64 KB | 71% |
 | RAM | 2,928 B | 12 KB | 24% |
 
 ### Added
@@ -57,7 +57,7 @@ Hour Utilization Monitor: a coin-cell data logger that timestamps machine run ti
 - Frequency brackets ([docs](docs/hum_engine_freq.md)): accel at 800 Hz, +/-8 g, Goertzel over 31.25-150 Hz on all axes every 0.64 s; the stronger band picks idle (31.25-56.25 Hz) or operating (62.5-150 Hz) if its rms clears a sloped gate (700 mg at 30 Hz to 200 mg at 100 Hz), else off; the bracket changes after 2 agreeing frames; `HUM_EN` (off) also runs it all through the awake window with a `hum:` line and 1/2/3 LED blips per frame
 - EEPROM erase: `ERASE` over UART, accepted by a button press within 10 s ([tools.md](tools/tools.md#erasing-the-eeprom))
 - EEPROM map in `main.cpp`: unit number 0x0000, boot count 0x0004, idle and operating duration totals (seconds) at 0x0008 and 0x000C, durations not written yet
-- State machine ([docs](docs/state_machine.md)): off, idle, operating; every wake samples until 2 readings agree (max 5); idle/operating light-sleep 60 s on the RTC wake-up timer with the accel off, off deep-sleeps until the button or motion (accel low-power wake-up on INT1, `ACC_WAKE_EN`); leaving idle or operating adds its duration to the EEPROM total; transitions print a line; status line totals include the session in progress
+- State machine ([docs](docs/state_machine.md)): off, idle, operating; every wake samples until 2 readings agree (max 5); idle/operating light-sleep 60 s on the RTC wake-up timer with the accel off, off deep-sleeps until the button or motion (accel low-power wake-up on INT1, `ACC_WAKE_EN`); leaving idle or operating adds its duration to the EEPROM total; transitions print a line; status line totals include the session in progress; `DBG_EN` (on for field testing) adds timestamped `DBG` lines for each sample, sleep and wake
 - Unit number: set with `U<number>` over UART ([tools.md](tools/tools.md#setting-the-unit-number)), printed at boot and in the status line
 - Status line on wake and button press: time, unit, temperature, supply, idle and operating totals in minutes, e.g. `20261105-21:50:40 u2 23.7C 2704mV id0m op0m`
 - Boot line `hum_fw <git describe>` from [tools/git_rev.py](tools/tools.md#git_revpy), after a blank line
