@@ -1,6 +1,10 @@
 #include <Arduino.h>
 #include <Wire.h>
 
+#ifndef FW_REV
+#define FW_REV "unknown"   // set by tools/git_rev.py
+#endif
+
 
 // pin assignments (Arduino pin names; for HAL use digitalPinToPort() / digitalPinToBitMask())
 #define LED_PIN              PA8     // pin 18, active high
@@ -62,10 +66,10 @@
 #define ACC_WU_THS           2U      // wake on motion over 2 x 31.25 mg (1/64 of FS), high-pass filtered
 #define ACC_INT_DROP_MS      200U    // INT1 drops on the next internal sample after a clear (80 ms at 12.5 Hz)
 #define ACC_SETTLE_MS        250U    // after leaving hum mode, let the wake-up filter settle before sleeping
-#define ACC_UG_PER_LSB       244     // +/-2 g: 0.244 mg per 14-bit LSB
 #define ACC_UG_PER_LSB_HUM   976     // +/-8 g: 0.976 mg per 14-bit LSB (first machine test peaked at 4 g)
 #define ACC_FULL_SCALE       8191    // 14-bit max count: a sample at this level has clipped
-#define HUM_FIRST_MS         20U     // after hum_start, ~16 samples (FIFO holds 32) for the wake status line
+#define HUM_FIRST_MS         20U     // after hum_start, ~16 samples (FIFO holds 32) and a fresh temperature
+                                     // before the wake status line
 
 // engine hum brackets (docs/hum_engine_freq.md): Goertzel over 128-sample blocks at 800 Hz,
 // bins 5..24 = 31.25..150 Hz in 6.25 Hz steps, all three axes; a frame is 4 blocks (512 samples, 0.64 s)
@@ -137,7 +141,7 @@ static uint8_t hum_cand = HUM_BRACKET_NONE; // bracket waiting for confirmation,
 static uint8_t hum_cand_n = 0;
 static int32_t hum_peak = 0;                // largest |count| this frame, gravity included
 static bool hum_ovr = false;                // FIFO overran this frame: samples were lost
-static int16_t hum_last[3];                 // newest sample, for the status line while in hum mode
+static int16_t hum_last[3];                 // newest sample drained from the FIFO
 
 
 // replaces the variant's empty weak default; runs before setup() and again after each Stop 2 wake
@@ -239,20 +243,6 @@ static void acc_clear_int(void) {
   uint8_t src;
 
   acc_read(ACC_REG_ALL_INT_SRC, &src, 1);
-}
-
-// returns acceleration in mg; low-power mode 1 zeroes the bottom 2 bits of the 14-bit field,
-// so the 14-bit scale still applies at 12-bit (0.976 mg) resolution
-static bool acc_read_mg(int32_t *x, int32_t *y, int32_t *z) {
-  uint8_t buf[6];
-
-  if (!acc_read(ACC_REG_OUT_X_L, buf, sizeof(buf))) {
-    return false;
-  }
-  *x = ((int16_t)(buf[1] << 8 | buf[0]) >> 2) * ACC_UG_PER_LSB / 1000;
-  *y = ((int16_t)(buf[3] << 8 | buf[2]) >> 2) * ACC_UG_PER_LSB / 1000;
-  *z = ((int16_t)(buf[5] << 8 | buf[4]) >> 2) * ACC_UG_PER_LSB / 1000;
-  return true;
 }
 
 // die temperature in tenths of a degree C; +/-0.8 C typ over 0..70 C
@@ -670,8 +660,8 @@ static void hum_sample(const int16_t v[3]) {
   hum_frame();
 }
 
-// drain the FIFO; at 800 Hz it holds 40 ms, so this must run at least that often. hum_last always
-// gets the newest sample for the status line; the bracket analysis only runs with HUM_EN
+// drain the FIFO; at 800 Hz it holds 40 ms, so this must run at least that often. The bracket
+// analysis only runs with HUM_EN; otherwise the samples are just discarded
 static void hum_service(void) {
   uint8_t st, buf[ACC_FIFO_CHUNK * 6];
 
@@ -790,7 +780,7 @@ void setup() {
   Wire.begin();
   Wire.setClock(I2C_CLOCK_HZ);
 
-  uart.println("hello");
+  uart.println("\r\nhum_fw " FW_REV);    // blank line first, to set each boot apart in a running log
   uart.println(lse_ok ? "lse: ok" : "lse: FAIL, MSI untrimmed");
   rtc_ok = rtc_init();
   char ts[18];
@@ -929,32 +919,40 @@ static bool rx_service(void) {
   return got;
 }
 
-// one status line: time, unit number, what triggered it, acceleration, temperature, supply
-static void print_status(const char *why) {
-  char ts[18], unit[12];
-  int32_t x, y, z, dc;
+// a stored duration in whole minutes, or "?" if the EEPROM can't be read
+static void eep_minutes_format(uint16_t addr, char *buf, size_t len) {
+  uint32_t s;
+
+  if (eep_ok && eep_read_count(addr, &s)) {
+    snprintf(buf, len, "%lu", s / 60);
+  } else {
+    snprintf(buf, len, "?");
+  }
+}
+
+// one status line: time, unit number, temperature, supply, idle and operating totals in minutes, e.g.
+// 20261105-21:50:40 u2 23.7C 2704mV id0m op0m  (temperature needs the accel running, as it is while awake)
+static void print_status(void) {
+  char ts[18], unit[12], temp[10], idle[12], op[12];
+  int32_t dc;
   uint32_t vcc = vcc_read_mv();
 
   if (!rtc_format(ts, sizeof(ts))) {
     strcpy(ts, "rtc unset");
   }
-  unit_format(unit, sizeof(unit));
-  // in hum mode the output registers are the FIFO head, so use the newest drained sample instead
-  bool got = false;
-  if (hum_on) {
-    x = (int32_t)hum_last[0] * ACC_UG_PER_LSB_HUM / 1000;
-    y = (int32_t)hum_last[1] * ACC_UG_PER_LSB_HUM / 1000;
-    z = (int32_t)hum_last[2] * ACC_UG_PER_LSB_HUM / 1000;
-    got = true;
+  if (unit_number == EEP_UNIT_UNSET) {
+    strcpy(unit, "-");
   } else {
-    got = acc_ok && acc_read_mg(&x, &y, &z);
+    unit_format(unit, sizeof(unit));
   }
-  if (got && acc_read_temp_dc(&dc)) {
-    uart.printf("%s  unit %s  %s  x=%5ld y=%5ld z=%5ld mg  temp %s%ld.%ld C  vcc %lu mV\r\n", ts, unit, why,
-                x, y, z, dc < 0 ? "-" : "", labs(dc) / 10, labs(dc) % 10, vcc);
+  if (acc_ok && acc_read_temp_dc(&dc)) {
+    snprintf(temp, sizeof(temp), "%s%ld.%ld", dc < 0 ? "-" : "", labs(dc) / 10, labs(dc) % 10);
   } else {
-    uart.printf("%s  unit %s  %s  acc: read failed  vcc %lu mV\r\n", ts, unit, why, vcc);
+    strcpy(temp, "?");
   }
+  eep_minutes_format(EEP_ADDR_IDLE_S, idle, sizeof(idle));
+  eep_minutes_format(EEP_ADDR_OP_S, op, sizeof(op));
+  uart.printf("%s u%s %sC %lumV id%sm op%sm\r\n", ts, unit, temp, vcc, idle, op);
 }
 
 
@@ -976,7 +974,7 @@ void loop() {
       }
       hum_reset();                // the FIFO overran during the erase; start a clean frame
     } else {
-      print_status("wake btn");
+      print_status();
     }
     awake_ms = millis();
   }
@@ -1001,7 +999,6 @@ void loop() {
   led_blips = 0;
   mcu_sleep();
 
-  const char *why = btn_woke ? "wake btn" : "wake acc";
   if (btn_woke) {
     // the press that woke us counts; debounce takes over from here so it isn't counted twice
     btn_down = true;
@@ -1015,6 +1012,6 @@ void loop() {
   hum_start();
   delay(HUM_FIRST_MS);
   hum_service();
-  print_status(why);
+  print_status();
   awake_ms = millis();
 }

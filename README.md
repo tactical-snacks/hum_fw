@@ -44,8 +44,8 @@ Hour Utilization Monitor: a coin-cell data logger that timestamps machine run ti
 
 | | Used | Total | |
 |---|---:|---:|---:|
-| Flash | 44,240 B | 64 KB | 68% |
-| RAM | 2,888 B | 12 KB | 24% |
+| Flash | 44,072 B | 64 KB | 67% |
+| RAM | 2,880 B | 12 KB | 23% |
 
 ### Added
 
@@ -58,4 +58,6 @@ Hour Utilization Monitor: a coin-cell data logger that timestamps machine run ti
 - EEPROM erase: `ERASE` over UART, accepted by a button press within 10 s ([tools.md](tools/tools.md#erasing-the-eeprom))
 - EEPROM map in `main.cpp`: unit number 0x0000, boot count 0x0004, idle and operating duration totals (seconds) at 0x0008 and 0x000C, durations not written yet
 - Unit number: set with `U<number>` over UART ([tools.md](tools/tools.md#setting-the-unit-number)), printed at boot and in the status line
+- Status line on wake and button press: time, unit, temperature, supply, idle and operating totals in minutes, e.g. `20261105-21:50:40 u2 23.7C 2704mV id0m op0m`
+- Boot line `hum_fw <git describe>` from [tools/git_rev.py](tools/tools.md#git_revpy), after a blank line
 

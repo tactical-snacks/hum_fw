@@ -85,6 +85,10 @@ A healthy board starts at every level in under about 300 ms. It needs an ST-Link
 
 Running it also clears the RTC, because the clock lives in the same backup domain as the crystal settings. Run `set_rtc.py` afterwards.
 
+## git_rev.py
+
+Not run by hand: PlatformIO runs it before each build (`extra_scripts` in `platformio.ini`). It passes `git describe --always --dirty --tags` to the firmware, which prints it at boot, e.g. `hum_fw 66349fb` or `hum_fw 66349fb-dirty` when built with uncommitted changes.
+
 ## Planned
 
 - Make `set_rtc.py` friendlier: show the clock before and after, prompt to wake the board, and give clear messages when the port is busy or the board doesn't answer.
