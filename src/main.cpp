@@ -23,12 +23,15 @@
 #define BTN_DEBOUNCE_MS      30U     // no external pull-up or RC on PA1
 #define LED_BLIP_ON_MS       5U      // state patterns are 5 ms blips: 1 off, 2 idle, 3 operating
 #define LED_BLIP_GAP_MS      150U    // blip spacing within a pattern
-#define LED_STATE_PERIOD_MS  1000U   // bracket detection off: 1 blip (off) per second while awake
+#define LED_STATE_PERIOD_MS  1000U   // while awake: the state's blips once a second (1 off, 2 idle, 3 operating)
 #define LED_UNSET_HALF_MS    100U    // clock unset: 100 ms on / 100 ms off (~0.15 mA lit through 4.7k)
 #define LED_WAKE_MS          50U     // flash on each wake
 #define AWAKE_MS             10000U  // stay up after a wake for button presses and serial commands
-#define ACC_WAKE_EN          false   // true: motion on INT1 also wakes; false: button only, accel powered down
-#define HUM_EN               false   // true: bracket detection while awake (hum: lines, LED blips); false: off
+#define ACC_WAKE_EN          true    // true: motion on INT1 wakes from deep sleep (state off); false: button only
+#define HUM_EN               false   // true: also run bracket detection all through the awake window, with hum:
+                                     // lines and per-frame blips (bench); the state machine measures either way
+#define SM_LIGHT_SLEEP_S     60U     // light sleep (idle, operating): the RTC timer wakes it this often to measure
+#define HUM_MAX_FRAMES       5U      // a measurement stops once 2 frames agree, or after this many (3.2 s)
 #define I2C_CLOCK_HZ         400000U // fast mode: drains the accel FIFO in time at 800 Hz
 #define RX_LINE_MAX          32U
 
@@ -117,6 +120,9 @@ static bool eep_ok = false;
 static uint32_t unit_number = EEP_UNIT_UNSET;
 static volatile bool btn_woke = false;      // set by the PA1 / PA0 EXTI handlers
 static volatile bool acc_woke = false;
+static volatile bool rtc_woke = false;      // set by the RTC wake-up timer
+static uint8_t sm_state = HUM_BRACKET_OFF;  // state machine (docs/state_machine.md): off, idle or operating
+static uint32_t sm_since_s = 0;             // when the current state began, RTC seconds since 2000
 static bool btn_down = false;               // debounced button state
 static uint32_t btn_stable_ms = 0;
 static bool eep_erase_armed = false;        // ERASE received, waiting for the button to accept
@@ -142,6 +148,9 @@ static uint8_t hum_cand_n = 0;
 static int32_t hum_peak = 0;                // largest |count| this frame, gravity included
 static bool hum_ovr = false;                // FIFO overran this frame: samples were lost
 static int16_t hum_last[3];                 // newest sample drained from the FIFO
+static bool hum_measuring = false;          // sm_measure is running: analyse frames even with HUM_EN off
+static uint8_t hum_frames = 0;              // frames finished since hum_start
+static const char *const hum_names[] = {"", "off", "idle", "operating"};
 
 
 // replaces the variant's empty weak default; runs before setup() and again after each Stop 2 wake
@@ -444,6 +453,23 @@ static bool rtc_format(char *buf, size_t len) {
   return true;
 }
 
+// seconds since 2000-01-01 00:00:00; every 4th year from 2000 to 2099 is a leap year
+static bool rtc_now_s(uint32_t *s) {
+  static const uint16_t cum[] = {0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334};
+  RTC_TimeTypeDef t;
+  RTC_DateTypeDef d;
+
+  if (!rtc_is_set()) {
+    return false;
+  }
+  HAL_RTC_GetTime(&hrtc, &t, RTC_FORMAT_BIN);
+  HAL_RTC_GetDate(&hrtc, &d, RTC_FORMAT_BIN);
+  uint32_t days = 365UL * d.Year + (d.Year + 3U) / 4U + cum[d.Month - 1] + d.Date - 1U +
+                  (d.Year % 4U == 0 && d.Month > 2 ? 1U : 0U);
+  *s = days * 86400UL + t.Hours * 3600UL + t.Minutes * 60UL + t.Seconds;
+  return true;
+}
+
 static int parse_num(const char *s, int digits) {
   int n = 0;
 
@@ -588,22 +614,24 @@ static void hum_frame(void) {
     raw = idle_wins ? HUM_BRACKET_IDLE : HUM_BRACKET_OP;
   }
   hum_confirm(raw);
-  // until two frames agree there's nothing confirmed, so show what this frame sensed
-  uint8_t shown = hum_state != HUM_BRACKET_NONE ? hum_state : raw;
+  hum_frames++;
 
-  static const char *const names[] = {"", "off", "idle", "operating"};
-  uint32_t peak_mg = (uint32_t)hum_peak * ACC_UG_PER_LSB_HUM / 1000;
+  if (HUM_EN) {
+    // until two frames agree there's nothing confirmed, so show what this frame sensed
+    uint8_t shown = hum_state != HUM_BRACKET_NONE ? hum_state : raw;
+    uint32_t peak_mg = (uint32_t)hum_peak * ACC_UG_PER_LSB_HUM / 1000;
 
-  uart.printf("hum: %u %-9s  raw %u  f %3lu.%02lu Hz  idle %lu.%lu  op %lu.%lu  all %lu.%lu  gate %lu.%lu mg rms"
-              "  peak %lu mg%s%s\r\n",
-              shown, names[shown], raw, f_x100 / 100, f_x100 % 100, idle_dmg / 10, idle_dmg % 10,
-              op_dmg / 10, op_dmg % 10, total_dmg / 10, total_dmg % 10, gate_dmg / 10, gate_dmg % 10, peak_mg,
-              hum_peak >= ACC_FULL_SCALE ? "  CLIPPED" : "", hum_ovr ? "  OVERRUN" : "");
+    uart.printf("hum: %u %-9s  raw %u  f %3lu.%02lu Hz  idle %lu.%lu  op %lu.%lu  all %lu.%lu  gate %lu.%lu mg rms"
+                "  peak %lu mg%s%s\r\n",
+                shown, hum_names[shown], raw, f_x100 / 100, f_x100 % 100, idle_dmg / 10, idle_dmg % 10,
+                op_dmg / 10, op_dmg % 10, total_dmg / 10, total_dmg % 10, gate_dmg / 10, gate_dmg % 10, peak_mg,
+                hum_peak >= ACC_FULL_SCALE ? "  CLIPPED" : "", hum_ovr ? "  OVERRUN" : "");
 
-  // while the clock is unset its rapid flash owns the LED
-  if (rtc_is_set()) {
-    led_blips = shown;
-    led_next_ms = millis();
+    // while the clock is unset its rapid flash owns the LED
+    if (rtc_is_set()) {
+      led_blips = shown;
+      led_next_ms = millis();
+    }
   }
   memset(hum_pow, 0, sizeof(hum_pow));
   hum_block = 0;
@@ -661,7 +689,7 @@ static void hum_sample(const int16_t v[3]) {
 }
 
 // drain the FIFO; at 800 Hz it holds 40 ms, so this must run at least that often. The bracket
-// analysis only runs with HUM_EN; otherwise the samples are just discarded
+// analysis runs during a measurement or with HUM_EN; otherwise the samples are just discarded
 static void hum_service(void) {
   uint8_t st, buf[ACC_FIFO_CHUNK * 6];
 
@@ -682,7 +710,7 @@ static void hum_service(void) {
       for (uint8_t a = 0; a < 3; a++) {
         hum_last[a] = (int16_t)(buf[i * 6 + a * 2 + 1] << 8 | buf[i * 6 + a * 2]) >> 2;
       }
-      if (HUM_EN) {
+      if (HUM_EN || hum_measuring) {
         hum_sample(hum_last);
       }
     }
@@ -702,20 +730,20 @@ static void hum_start(void) {
   acc_write(ACC_REG_FIFO_CTRL, ACC_FIFO_CONTINUOUS);
   hum_reset();
   hum_seeded = false;
-  hum_state = HUM_BRACKET_NONE;   // each wake decides from its own frames, not a default
+  hum_state = HUM_BRACKET_NONE;   // each measurement decides from its own frames, not a default
   hum_cand = HUM_BRACKET_NONE;
   hum_cand_n = 0;
   hum_on = true;
 }
 
-// back to the low-power motion-wake setup used while asleep, or powered down if motion wake is off
-static void hum_stop(void) {
+// leave capture: low-power motion wake-up on INT1 (deep sleep), or powered down (light sleep)
+static void hum_stop(bool motion) {
   if (!hum_on) {
     return;
   }
   hum_on = false;
   acc_write(ACC_REG_FIFO_CTRL, ACC_FIFO_BYPASS);
-  if (!ACC_WAKE_EN) {
+  if (!motion) {
     acc_write(ACC_REG_CTRL1, ACC_CTRL1_POWER_DOWN);
     return;
   }
@@ -734,7 +762,17 @@ static void acc_isr(void) {
   acc_woke = true;
 }
 
-// Stop 2: RTC, LSE and the EXTI wake pins keep running, SRAM is kept, everything else stops.
+extern "C" void RTC_TAMP_IRQHandler(void) {
+  HAL_RTCEx_WakeUpTimerIRQHandler(&hrtc);
+}
+
+extern "C" void HAL_RTCEx_WakeUpTimerEventCallback(RTC_HandleTypeDef *h) {
+  (void)h;
+  rtc_woke = true;
+}
+
+// Stop 2 until the button, motion or the RTC timer: RTC, LSE and the EXTI wake pins keep running,
+// SRAM is kept, everything else stops.
 // SWD drops out too, so uploads connect under reset (see upload_flags in platformio.ini).
 static void mcu_sleep(void) {
   acc_clear_int();
@@ -742,6 +780,9 @@ static void mcu_sleep(void) {
   uint32_t start = millis();
   while (digitalRead(ACC_INT1_PIN) == HIGH && millis() - start < ACC_INT_DROP_MS) {
   }
+  // an event latched before the clear is stale (e.g. the step from capture to motion mode); motion
+  // from here on raises a new edge, or re-latches INT1 for the level check below
+  acc_woke = false;
   uart.flush();
 
   // stop SysTick before masking, or a tick left pending ends WFI at once
@@ -749,7 +790,7 @@ static void mcu_sleep(void) {
   // with interrupts masked, an edge that lands after a check still ends WFI immediately;
   // unmasking briefly after each wake lets the EXTI handler set its flag
   __disable_irq();
-  while (!btn_woke && !acc_woke) {
+  while (!btn_woke && !acc_woke && !rtc_woke) {
     if (digitalRead(ACC_INT1_PIN) == HIGH) {
       acc_woke = true;    // re-latched, so no rising edge is coming
       break;
@@ -798,6 +839,8 @@ void setup() {
   uart.println(eep_ok ? "eep: ok" : "eep: FAIL");
 
   attachInterrupt(digitalPinToInterrupt(BTN_PIN), btn_isr, FALLING);
+  HAL_NVIC_SetPriority(RTC_TAMP_IRQn, 3, 0);
+  HAL_NVIC_EnableIRQ(RTC_TAMP_IRQn);
   if (ACC_WAKE_EN) {
     attachInterrupt(digitalPinToInterrupt(ACC_INT1_PIN), acc_isr, RISING);
   }
@@ -819,7 +862,7 @@ static bool btn_pressed(void) {
 }
 
 // LED patterns: clock unset = rapid 50% flash; otherwise blips for the state, 1 off, 2 idle, 3 operating,
-// once per hum frame, or 1 blip per second with bracket detection off
+// once a second (with HUM_EN, once per hum frame instead)
 // (swap for Flasher's portable branch once it's public)
 static void led_service(void) {
   static bool lit = false, unset = false;
@@ -838,7 +881,7 @@ static void led_service(void) {
   }
   if (!HUM_EN && now - state_ms >= LED_STATE_PERIOD_MS) {
     state_ms = now;
-    led_blips = HUM_BRACKET_OFF;
+    led_blips = sm_state;
     led_next_ms = now;
   }
   // timed from when the blip actually started, so a slow loop pass stretches it rather than skipping it
@@ -911,6 +954,7 @@ static bool rx_service(void) {
     } else if (line[0] == 'U') {
       unit_set(line + 1);
     } else if (line[0] == 'T' && rtc_set(line + 1) && rtc_format(ts, sizeof(ts))) {
+      rtc_now_s(&sm_since_s);     // so a session in progress doesn't jump by the correction
       uart.printf("rtc: set %s\r\n", ts);
     } else {
       uart.printf("bad command '%s'\r\n", line);
@@ -919,15 +963,18 @@ static bool rx_service(void) {
   return got;
 }
 
-// a stored duration in whole minutes, or "?" if the EEPROM can't be read
-static void eep_minutes_format(uint16_t addr, char *buf, size_t len) {
-  uint32_t s;
+// a state's stored total plus the session in progress, in whole minutes; "?" if the EEPROM can't be read
+static void sm_minutes_format(uint16_t addr, uint8_t state, char *buf, size_t len) {
+  uint32_t s, now;
 
-  if (eep_ok && eep_read_count(addr, &s)) {
-    snprintf(buf, len, "%lu", s / 60);
-  } else {
+  if (!eep_ok || !eep_read_count(addr, &s)) {
     snprintf(buf, len, "?");
+    return;
   }
+  if (sm_state == state && rtc_now_s(&now) && now > sm_since_s) {
+    s += now - sm_since_s;
+  }
+  snprintf(buf, len, "%lu", s / 60);
 }
 
 // one status line: time, unit number, temperature, supply, idle and operating totals in minutes, e.g.
@@ -950,9 +997,74 @@ static void print_status(void) {
   } else {
     strcpy(temp, "?");
   }
-  eep_minutes_format(EEP_ADDR_IDLE_S, idle, sizeof(idle));
-  eep_minutes_format(EEP_ADDR_OP_S, op, sizeof(op));
+  sm_minutes_format(EEP_ADDR_IDLE_S, HUM_BRACKET_IDLE, idle, sizeof(idle));
+  sm_minutes_format(EEP_ADDR_OP_S, HUM_BRACKET_OP, op, sizeof(op));
   uart.printf("%s u%s %sC %lumV id%sm op%sm\r\n", ts, unit, temp, vcc, idle, op);
+}
+
+
+// add the time spent in the state being left (idle or operating) to its EEPROM total
+static void sm_store(uint8_t state, uint32_t now) {
+  uint16_t addr = state == HUM_BRACKET_IDLE ? EEP_ADDR_IDLE_S : EEP_ADDR_OP_S;
+  uint32_t total;
+
+  if (!eep_ok || !eep_read_count(addr, &total) ||
+      !eep_write_count(addr, total + (now > sm_since_s ? now - sm_since_s : 0))) {
+    uart.println("sm: EEPROM write failed");
+  }
+}
+
+// one measurement: frames until two agree, at most HUM_MAX_FRAMES; NONE if they never agree
+static uint8_t sm_measure(void) {
+  if (!acc_ok) {
+    return HUM_BRACKET_NONE;
+  }
+  hum_start();
+  hum_frames = 0;
+  hum_measuring = true;
+  uint32_t start = millis(), limit = HUM_MAX_FRAMES * HUM_N * HUM_BLOCKS * 1000UL / 800U + 1000U;
+  while (hum_state == HUM_BRACKET_NONE && hum_frames < HUM_MAX_FRAMES && millis() - start < limit) {
+    hum_service();
+    led_service();
+  }
+  hum_measuring = false;
+  return hum_state;
+}
+
+// measure and act on the result; an undecided measurement keeps the current state
+static void sm_cycle(void) {
+  uint8_t next = sm_measure();
+  uint32_t now;
+  char ts[18];
+
+  if (next == HUM_BRACKET_NONE || next == sm_state || !rtc_now_s(&now)) {
+    return;
+  }
+  if (sm_state != HUM_BRACKET_OFF) {
+    sm_store(sm_state, now);
+  }
+  rtc_format(ts, sizeof(ts));
+  uart.printf("%s %s->%s\r\n", ts, hum_names[sm_state], hum_names[next]);
+  sm_state = next;
+  sm_since_s = now;
+}
+
+// light sleep (idle, operating): accel off, the RTC timer or the button wakes it;
+// deep sleep (off): no timer, only the button or motion wakes it
+static void sm_sleep(void) {
+  bool deep = sm_state == HUM_BRACKET_OFF;
+
+  hum_stop(deep && ACC_WAKE_EN);
+  rtc_woke = false;
+  if (!deep) {
+    HAL_RTCEx_SetWakeUpTimer_IT(&hrtc, SM_LIGHT_SLEEP_S - 1, RTC_WAKEUPCLOCK_CK_SPRE_16BITS, 0);
+  }
+  mcu_sleep();
+  HAL_RTCEx_DeactivateWakeUpTimer(&hrtc);
+  // the calendar shadow registers are stale after Stop until resynchronized
+  __HAL_RTC_WRITEPROTECTION_DISABLE(&hrtc);
+  HAL_RTC_WaitForSynchro(&hrtc);
+  __HAL_RTC_WRITEPROTECTION_ENABLE(&hrtc);
 }
 
 
@@ -989,29 +1101,32 @@ void loop() {
   }
   btn_woke = false;
 
-  // stay awake while the clock is unset so the LED can blip
+  // stay awake while the clock is unset so the LED can flash
   if (!rtc_is_set() || millis() - awake_ms < AWAKE_MS) {
     return;
   }
 
-  hum_stop();
+  sm_cycle();
   digitalWrite(LED_PIN, LOW);     // in case sleep lands mid-blip
   led_blips = 0;
-  mcu_sleep();
+  sm_sleep();
 
   if (btn_woke) {
     // the press that woke us counts; debounce takes over from here so it isn't counted twice
     btn_down = true;
     btn_stable_ms = millis();
+    digitalWrite(LED_PIN, HIGH);
+    delay(LED_WAKE_MS);
+    digitalWrite(LED_PIN, LOW);
+    hum_start();
+    delay(HUM_FIRST_MS);
+    hum_service();
+    print_status();
+    awake_ms = millis();
+  } else {
+    awake_ms = millis() - AWAKE_MS;   // timer or motion: measure straight away, no awake window
   }
   btn_woke = false;
   acc_woke = false;
-  digitalWrite(LED_PIN, HIGH);
-  delay(LED_WAKE_MS);
-  digitalWrite(LED_PIN, LOW);
-  hum_start();
-  delay(HUM_FIRST_MS);
-  hum_service();
-  print_status();
-  awake_ms = millis();
+  rtc_woke = false;
 }
