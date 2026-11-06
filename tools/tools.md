@@ -49,15 +49,19 @@ It sends `T<YYYYMMDD-HH:MM:SS>` timed to arrive on the next whole second, then p
 
 Once the clock is set, the board sleeps and can't receive serial commands. Press its button first; it stays awake for 10 s after a wake or button press, and each command received restarts that window.
 
-The clock stays set through resets and reflashing. It is lost when the coin cell is removed. While the clock is unset, the LED blips for 5 ms once a second and the boot message reads `rtc: unset`.
+The clock stays set through resets and reflashing. It is lost when the coin cell is removed. While the clock is unset, the LED flashes rapidly (100 ms on, 100 ms off) and the boot message reads `rtc: unset`. Once it's set, the LED blips the state while awake: 1 blip for off, 2 for idle, 3 for operating.
 
 You can also set the clock by hand from any serial terminal by typing the same command, e.g. `T20261031-14:05:00` followed by Enter.
 
+## Setting the unit number
+
+Type `U` and the number followed by Enter in a serial terminal while the board is awake, e.g. `U1001`. The board stores it in the EEPROM, reads it back and replies `unit: set 1001`. Numbers run from 0 to 4294967294. The unit number prints at boot (`unit: 1001`, or `unit: unset, send U<number>` when blank) and in every status line after the timestamp.
+
 ## Erasing the EEPROM
 
-Type `ERASE` followed by Enter in a serial terminal while the board is awake. The board replies `eep: press the button within 10 s to erase all 64 KB`; press the button to accept. It writes every byte back to 0xFF and reads each page back, which takes about 6 s, then prints `eep: erased in … ms`. With no press in 10 s it prints `eep: erase cancelled, no button press` and nothing changes.
+Type `ERASE` followed by Enter in a serial terminal while the board is awake. The board replies `eep: press the button within 10 s to erase all 64 KB`; press the button to accept. It writes every byte back to 0xFF and reads each page back, which takes about 5.4 s, then prints `eep: erased in … ms`. With no press in 10 s it prints `eep: erase cancelled, no button press` and nothing changes.
 
-This also resets the boot count, so the next boot reads `eep: boot count 1`. The RTC is not affected.
+This clears the unit number and resets the boot count, so the next boot reads `unit: unset` and `eep: boot count 1`. The RTC is not affected.
 
 ## serial_capture.py
 

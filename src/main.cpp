@@ -17,9 +17,10 @@
 
 #define UART_BAUD            115200
 #define BTN_DEBOUNCE_MS      30U     // no external pull-up or RC on PA1
-#define LED_BLIP_ON_MS       5U      // all LED patterns are 5 ms blips
+#define LED_BLIP_ON_MS       5U      // state patterns are 5 ms blips: 1 off, 2 idle, 3 operating
 #define LED_BLIP_GAP_MS      150U    // blip spacing within a pattern
-#define LED_UNSET_PERIOD_MS  1000U   // clock unset: one blip per second
+#define LED_STATE_PERIOD_MS  1000U   // bracket detection off: 1 blip (off) per second while awake
+#define LED_UNSET_HALF_MS    100U    // clock unset: 100 ms on / 100 ms off (~0.15 mA lit through 4.7k)
 #define LED_WAKE_MS          50U     // flash on each wake
 #define AWAKE_MS             10000U  // stay up after a wake for button presses and serial commands
 #define ACC_WAKE_EN          false   // true: motion on INT1 also wakes; false: button only, accel powered down
@@ -93,9 +94,11 @@
 #define EEP_ERASE_CONFIRM_MS 10000U  // after the ERASE command, a button press within this long erases
 #define EEP_WRITE_TIMEOUT_MS 10U
 // EEPROM map: each counter is a uint32_t LE, 0xFFFFFFFF when erased (eep_read_count reads that as 0)
-#define EEP_ADDR_BOOT_COUNT  0x0000U  // boots
-#define EEP_ADDR_IDLE_S      0x0004U  // total idle duration, seconds (docs/state_machine.md)
-#define EEP_ADDR_OP_S        0x0008U  // total operating duration, seconds
+#define EEP_ADDR_UNIT        0x0000U  // unit number (serial number), set over UART with U<number>
+#define EEP_ADDR_BOOT_COUNT  0x0004U  // boots
+#define EEP_ADDR_IDLE_S      0x0008U  // total idle duration, seconds (docs/state_machine.md)
+#define EEP_ADDR_OP_S        0x000CU  // total operating duration, seconds
+#define EEP_UNIT_UNSET       0xFFFFFFFFUL
 
 
 // the variant's default Serial is USART4 on PA0/PA1 (ACC_INT1/BTN), so use USART1
@@ -107,6 +110,7 @@ static bool lse_ok = false;
 static bool rtc_ok = false;
 static bool acc_ok = false;
 static bool eep_ok = false;
+static uint32_t unit_number = EEP_UNIT_UNSET;
 static volatile bool btn_woke = false;      // set by the PA1 / PA0 EXTI handlers
 static volatile bool acc_woke = false;
 static bool btn_down = false;               // debounced button state
@@ -325,14 +329,30 @@ static bool eep_write_count(uint16_t addr, uint32_t count) {
          eep_read(addr, (uint8_t *)&check, sizeof(check)) && check == count;
 }
 
-// probe the device and bump the boot counter
+// "unset" or the unit number in decimal
+static void unit_format(char *buf, size_t len) {
+  if (unit_number == EEP_UNIT_UNSET) {
+    snprintf(buf, len, "unset");
+  } else {
+    snprintf(buf, len, "%lu", unit_number);
+  }
+}
+
+// probe the device, read the unit number and bump the boot counter
 static bool eep_init(void) {
   uint32_t boots;
+  char unit[12];
 
   if (!eep_wait_ready()) {
     uart.println("eep: no ACK at 0x50");
     return false;
   }
+  if (!eep_read(EEP_ADDR_UNIT, (uint8_t *)&unit_number, sizeof(unit_number))) {
+    uart.println("eep: unit number read failed");
+    return false;
+  }
+  unit_format(unit, sizeof(unit));
+  uart.printf("unit: %s%s\r\n", unit, unit_number == EEP_UNIT_UNSET ? ", send U<number>" : "");
   if (!eep_read_count(EEP_ADDR_BOOT_COUNT, &boots) ||
       !eep_write_count(EEP_ADDR_BOOT_COUNT, ++boots)) {
     uart.println("eep: boot count read/write failed");
@@ -342,7 +362,7 @@ static bool eep_init(void) {
   return true;
 }
 
-// back to the erased state (all 0xFF), page by page with read-back; ~6 s for 64 KB
+// back to the erased state (all 0xFF), page by page with read-back; 5.4 s for 64 KB
 static bool eep_erase(void) {
   uint8_t buf[EEP_PAGE_SIZE];
 
@@ -590,7 +610,7 @@ static void hum_frame(void) {
               op_dmg / 10, op_dmg % 10, total_dmg / 10, total_dmg % 10, gate_dmg / 10, gate_dmg % 10, peak_mg,
               hum_peak >= ACC_FULL_SCALE ? "  CLIPPED" : "", hum_ovr ? "  OVERRUN" : "");
 
-  // while the clock is unset its 1/s blip owns the LED, so a bracket-1 blip can't be mistaken for it
+  // while the clock is unset its rapid flash owns the LED
   if (rtc_is_set()) {
     led_blips = shown;
     led_next_ms = millis();
@@ -808,16 +828,27 @@ static bool btn_pressed(void) {
   return false;
 }
 
-// blip patterns: clock unset = 1 blip per second, otherwise each hum frame queues its bracket number
+// LED patterns: clock unset = rapid 50% flash; otherwise blips for the state, 1 off, 2 idle, 3 operating,
+// once per hum frame, or 1 blip per second with bracket detection off
 // (swap for Flasher's portable branch once it's public)
 static void led_service(void) {
-  static bool lit = false;
-  static uint32_t lit_ms = 0, unset_ms = 0;
+  static bool lit = false, unset = false;
+  static uint32_t lit_ms = 0, state_ms = 0;
   uint32_t now = millis();
 
-  if (!rtc_is_set() && now - unset_ms >= LED_UNSET_PERIOD_MS) {
-    unset_ms = now;
-    led_blips = 1;
+  if (!rtc_is_set()) {
+    digitalWrite(LED_PIN, now % (2 * LED_UNSET_HALF_MS) < LED_UNSET_HALF_MS ? HIGH : LOW);
+    unset = true;
+    return;
+  }
+  if (unset) {                    // clock just set: don't leave the flash lit
+    digitalWrite(LED_PIN, LOW);
+    unset = false;
+    lit = false;
+  }
+  if (!HUM_EN && now - state_ms >= LED_STATE_PERIOD_MS) {
+    state_ms = now;
+    led_blips = HUM_BRACKET_OFF;
     led_next_ms = now;
   }
   // timed from when the blip actually started, so a slow loop pass stretches it rather than skipping it
@@ -835,8 +866,32 @@ static void led_service(void) {
   }
 }
 
+// U<number>: decimal digits only, stored with read-back
+static void unit_set(const char *s) {
+  char *end;
+  char unit[12];
+
+  if (*s < '0' || *s > '9' || strlen(s) > 10) {
+    uart.printf("unit: bad number '%s'\r\n", s);
+    return;
+  }
+  unsigned long long v = strtoull(s, &end, 10);
+  if (*end != '\0' || v >= EEP_UNIT_UNSET) {
+    uart.printf("unit: bad number '%s'\r\n", s);
+    return;
+  }
+  if (!eep_ok || !eep_write_count(EEP_ADDR_UNIT, (uint32_t)v)) {
+    uart.println("unit: EEPROM write failed");
+    return;
+  }
+  unit_number = (uint32_t)v;
+  unit_format(unit, sizeof(unit));
+  uart.printf("unit: set %s\r\n", unit);
+}
+
 // line commands on UART RX; returns true if a line arrived
 //   T<YYYYMMDD-HH:MM:SS>  set the clock
+//   U<number>             set the unit number, 0..4294967294
 //   ERASE                 erase the whole EEPROM once the button is pressed to accept
 static bool rx_service(void) {
   static char line[RX_LINE_MAX];
@@ -863,24 +918,27 @@ static bool rx_service(void) {
       eep_erase_armed = true;
       eep_erase_ms = millis();
       uart.printf("eep: press the button within %u s to erase all 64 KB\r\n", EEP_ERASE_CONFIRM_MS / 1000);
+    } else if (line[0] == 'U') {
+      unit_set(line + 1);
     } else if (line[0] == 'T' && rtc_set(line + 1) && rtc_format(ts, sizeof(ts))) {
       uart.printf("rtc: set %s\r\n", ts);
     } else {
-      uart.printf("rtc: bad command '%s'\r\n", line);
+      uart.printf("bad command '%s'\r\n", line);
     }
   }
   return got;
 }
 
-// one status line: time, what triggered it, acceleration, temperature, supply
+// one status line: time, unit number, what triggered it, acceleration, temperature, supply
 static void print_status(const char *why) {
-  char ts[18];
+  char ts[18], unit[12];
   int32_t x, y, z, dc;
   uint32_t vcc = vcc_read_mv();
 
   if (!rtc_format(ts, sizeof(ts))) {
     strcpy(ts, "rtc unset");
   }
+  unit_format(unit, sizeof(unit));
   // in hum mode the output registers are the FIFO head, so use the newest drained sample instead
   bool got = false;
   if (hum_on) {
@@ -892,10 +950,10 @@ static void print_status(const char *why) {
     got = acc_ok && acc_read_mg(&x, &y, &z);
   }
   if (got && acc_read_temp_dc(&dc)) {
-    uart.printf("%s  %s  x=%5ld y=%5ld z=%5ld mg  temp %s%ld.%ld C  vcc %lu mV\r\n", ts, why,
+    uart.printf("%s  unit %s  %s  x=%5ld y=%5ld z=%5ld mg  temp %s%ld.%ld C  vcc %lu mV\r\n", ts, unit, why,
                 x, y, z, dc < 0 ? "-" : "", labs(dc) / 10, labs(dc) % 10, vcc);
   } else {
-    uart.printf("%s  %s  acc: read failed  vcc %lu mV\r\n", ts, why, vcc);
+    uart.printf("%s  unit %s  %s  acc: read failed  vcc %lu mV\r\n", ts, unit, why, vcc);
   }
 }
 
