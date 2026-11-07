@@ -786,6 +786,9 @@ static void mcu_sleep(void) {
   acc_woke = false;
   uart.flush();
 
+  // keep the flash powered in Stop 2: with it powered down (the reset default) an RTC timer wake
+  // HardFaults fetching the first instruction after WFI; button wakes were unaffected
+  CLEAR_BIT(PWR->CR1, PWR_CR1_FPD_STOP);
   // stop SysTick before masking, or a tick left pending ends WFI at once
   HAL_SuspendTick();
   // with interrupts masked, an edge that lands after a check still ends WFI immediately;

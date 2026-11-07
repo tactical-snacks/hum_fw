@@ -44,7 +44,7 @@ Hour Utilization Monitor: a coin-cell data logger that timestamps machine run ti
 
 | | Used | Total | |
 |---|---:|---:|---:|
-| Flash | 46,752 B | 64 KB | 71% |
+| Flash | 46,768 B | 64 KB | 71% |
 | RAM | 2,928 B | 12 KB | 24% |
 
 ### Added
