@@ -12,7 +12,7 @@ What the logger does with each confirmed bracket. How the brackets are detected 
 
 | Mode | Wakes on | Used in |
 |---|---|---|
-| **Light sleep** | timer: after X minutes (RTC wake-up), or a button press | Idle, Operating: wake, sample, sleep again |
+| **Light sleep** | timer: every 1 minute (RTC wake-up; 5 s with `DBG_EN`), or a button press | Idle, Operating: wake, sample, sleep again |
 | **Deep sleep** | external interrupt only: button press or accel interrupt; never by time | Off |
 
 Both are Stop 2 on the MCU; the difference is whether the RTC wake-up timer is armed.
@@ -36,7 +36,7 @@ Every wake ends in one sample: a timer or motion wake samples at once; a button 
 
 - Measured with the RTC, so the clock must be set; while it's unset the board stays awake and doesn't sample.
 - Stored in EEPROM as running totals in seconds when a state is left (addresses in `main.cpp`). Transitions are only seen at samples, so durations are accurate to about one light-sleep interval.
-- The status line shows each total plus the session in progress, in minutes.
+- The status line shows each total plus the session in progress, in minutes (in seconds with `DBG_EN`).
 - Setting the clock mid-session restarts that session's timing, so the correction isn't counted.
 - The state and the start of the current session are kept only in RAM: a reset or battery swap loses the session in progress (stored totals are kept) and starts again from Off.
 - Each transition prints a line, e.g. `20261105-22:10:05 off->operating`.

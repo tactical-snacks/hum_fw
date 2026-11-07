@@ -30,9 +30,11 @@
 #define ACC_WAKE_EN          true    // true: motion on INT1 wakes from deep sleep (state off); false: button only
 #define HUM_EN               false   // true: also run bracket detection all through the awake window, with hum:
                                      // lines and per-frame blips (bench); the state machine measures either way
-#define SM_LIGHT_SLEEP_S     60U     // light sleep (idle, operating): the RTC timer wakes it this often to measure
+#define DBG_EN               true    // true: test timescale and DBG lines for each sample, sleep and wake
+                                     // (field testing): 5 s light sleep, status totals in seconds
+#define SM_LIGHT_SLEEP_S     (DBG_EN ? 5U : 60U)  // light sleep (idle, operating): the RTC timer wakes it
+                                                  // this often to measure
 #define HUM_MAX_FRAMES       5U      // a measurement stops once 2 frames agree, or after this many (3.2 s)
-#define DBG_EN               true    // true: DBG lines for each sample, sleep and wake (field testing)
 #define I2C_CLOCK_HZ         400000U // fast mode: drains the accel FIFO in time at 800 Hz
 #define RX_LINE_MAX          32U
 
@@ -967,8 +969,9 @@ static bool rx_service(void) {
   return got;
 }
 
-// a state's stored total plus the session in progress, in whole minutes; "?" if the EEPROM can't be read
-static void sm_minutes_format(uint16_t addr, uint8_t state, char *buf, size_t len) {
+// a state's stored total plus the session in progress, in whole minutes (seconds with DBG_EN);
+// "?" if the EEPROM can't be read
+static void sm_total_format(uint16_t addr, uint8_t state, char *buf, size_t len) {
   uint32_t s, now;
 
   if (!eep_ok || !eep_read_count(addr, &s)) {
@@ -978,11 +981,12 @@ static void sm_minutes_format(uint16_t addr, uint8_t state, char *buf, size_t le
   if (sm_state == state && rtc_now_s(&now) && now > sm_since_s) {
     s += now - sm_since_s;
   }
-  snprintf(buf, len, "%lu", s / 60);
+  snprintf(buf, len, "%lu", DBG_EN ? s : s / 60);
 }
 
 // one status line: time, unit number, temperature, supply, idle and operating totals in minutes, e.g.
 // 20261105-21:50:40 u2 23.7C 2704mV id0m op0m  (temperature needs the accel running, as it is while awake)
+// with DBG_EN it's tagged DBG and the totals are in seconds: 20261105-21:50:40 DBG u2 23.7C 2704mV id0s op0s
 static void print_status(void) {
   char ts[18], unit[12], temp[10], idle[12], op[12];
   int32_t dc;
@@ -1001,9 +1005,10 @@ static void print_status(void) {
   } else {
     strcpy(temp, "?");
   }
-  sm_minutes_format(EEP_ADDR_IDLE_S, HUM_BRACKET_IDLE, idle, sizeof(idle));
-  sm_minutes_format(EEP_ADDR_OP_S, HUM_BRACKET_OP, op, sizeof(op));
-  uart.printf("%s u%s %sC %lumV id%sm op%sm\r\n", ts, unit, temp, vcc, idle, op);
+  sm_total_format(EEP_ADDR_IDLE_S, HUM_BRACKET_IDLE, idle, sizeof(idle));
+  sm_total_format(EEP_ADDR_OP_S, HUM_BRACKET_OP, op, sizeof(op));
+  const char *u = DBG_EN ? "s" : "m";
+  uart.printf("%s %su%s %sC %lumV id%s%s op%s%s\r\n", ts, DBG_EN ? "DBG " : "", unit, temp, vcc, idle, u, op, u);
 }
 
 
@@ -1058,7 +1063,7 @@ static void sm_cycle(void) {
   uint32_t now;
   char ts[18];
 
-  dbg("sampled %s in %u", next == HUM_BRACKET_NONE ? "undecided" : hum_names[next], hum_frames);
+  dbg("sampled %s", next == HUM_BRACKET_NONE ? "undecided" : hum_names[next]);
   if (next == HUM_BRACKET_NONE || next == sm_state || !rtc_now_s(&now)) {
     return;
   }
