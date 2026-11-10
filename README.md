@@ -36,6 +36,10 @@ Hour Utilization Monitor: a coin-cell data logger that timestamps machine run ti
 - [ ] store and retrieve idle/operating durations
 - [ ] timestamp
 
+## AI disclosure
+
+This project was written with the help of AI (Claude Code). The frequency brackets and amplitude gate come from accelerometer measurements on a running engine ([docs](docs/hum_engine_freq.md)). The firmware was tested on [hum_hw](https://github.com/tactical-snacks/hum_hw).
+
 # Changelog
 
 ## [UNRELEASED]
