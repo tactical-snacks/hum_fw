@@ -32,9 +32,9 @@ Hour Utilization Monitor: a coin-cell data logger that timestamps machine run ti
 - [x] interface with accel, eep
 - [x] rtc setup
 - [x] freq bracket indicate - LED/serial output current freq bracket
-- [ ] bracket time - serial output time in bracket for a continuous session
+- [x] bracket time - serial output time in bracket
 - [ ] store and retrieve idle/operating durations
-- [ ] timestamp
+- [ ] sessions with timestamps
 
 ## AI disclosure
 
