@@ -71,7 +71,7 @@ Records a serial port for a fixed time and prints what it receives.
 ~/.platformio/penv/Scripts/python.exe -I tools/serial_capture.py 15
 ```
 
-The argument is the capture time in seconds.
+The argument is the capture time in seconds. `--stamp` prefixes each line with the PC time it arrived, to the millisecond (`[PC 20261110-10:30:51.123] ...`), for checking RTC drift against the PC clock.
 
 ## lse_drive_timing.tcl
 

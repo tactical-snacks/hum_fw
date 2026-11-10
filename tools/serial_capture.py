@@ -1,10 +1,12 @@
 """Capture a serial port for a fixed time and echo it to stdout.
 
-usage: python -I tools/serial_capture.py SECONDS [--port PORT] [--baud BAUD]
+usage: python -I tools/serial_capture.py SECONDS [--port PORT] [--baud BAUD] [--stamp]
+--stamp prefixes each line with the PC time it arrived (to ms), e.g. to check RTC drift.
 PORT and BAUD default to monitor_port / monitor_speed from platformio.ini (+ platformio_local.ini).
 Uses pyserial and platformio from the PlatformIO venv (~/.platformio/penv).
 """
 import argparse
+import datetime
 import os
 import sys
 import time
@@ -34,17 +36,32 @@ def main():
     ap.add_argument('seconds', type=float)
     ap.add_argument('--port', default=port)
     ap.add_argument('--baud', type=int, default=baud)
+    ap.add_argument('--stamp', action='store_true', help='prefix each line with the PC time it arrived')
     args = ap.parse_args()
     if not args.port:
         ap.error('no --port given and no monitor_port in platformio_local.ini')
 
-    with serial.Serial(args.port, args.baud, timeout=0.2) as s:
+    with serial.Serial(args.port, args.baud, timeout=0.05 if args.stamp else 0.2) as s:
         end = time.time() + args.seconds
+        line_start = True
         while time.time() < end:
             data = s.read(256)
-            if data:
-                sys.stdout.write(data.decode('ascii', 'replace').replace('\r', ''))
-                sys.stdout.flush()
+            if not data:
+                continue
+            text = data.decode('ascii', 'replace').replace('\r', '')
+            if args.stamp:
+                out = []
+                for ch in text:
+                    if line_start:
+                        now = datetime.datetime.now()
+                        out.append('[PC %s.%03d] ' % (now.strftime('%Y%m%d-%H:%M:%S'), now.microsecond // 1000))
+                        line_start = False
+                    out.append(ch)
+                    if ch == '\n':
+                        line_start = True
+                text = ''.join(out)
+            sys.stdout.write(text)
+            sys.stdout.flush()
 
 
 if __name__ == '__main__':
