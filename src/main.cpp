@@ -108,7 +108,9 @@
 #define EEP_ADDR_BOOT_COUNT  0x0004U  // boots
 #define EEP_ADDR_IDLE_S      0x0008U  // total idle duration, seconds (docs/state_machine.md)
 #define EEP_ADDR_OP_S        0x000CU  // total operating duration, seconds
+#define EEP_ADDR_RTC_CAL     0x0010U  // RTC drift being corrected, int32 in 0.1 ppm, + = runs fast; C<ppm>
 #define EEP_UNIT_UNSET       0xFFFFFFFFUL
+#define RTC_CAL_MAX_TENTHS   4800    // +-480.0 ppm, inside smooth calibration's -487.1..+488.5 ppm
 
 
 // the variant's default Serial is USART4 on PA0/PA1 (ACC_INT1/BTN), so use USART1
@@ -121,6 +123,7 @@ static bool rtc_ok = false;
 static bool acc_ok = false;
 static bool eep_ok = false;
 static uint32_t unit_number = EEP_UNIT_UNSET;
+static int32_t rtc_cal_tenths = 0;          // RTC drift being corrected, 0.1 ppm, + = runs fast
 static volatile bool btn_woke = false;      // set by the PA1 / PA0 EXTI handlers
 static volatile bool acc_woke = false;
 static volatile bool rtc_woke = false;      // set by the RTC wake-up timer
@@ -433,6 +436,52 @@ static bool rtc_init(void) {
     }
   }
   return true;
+}
+
+// smooth calibration over 32 s (2^20 RTCCLK): CALM masks that many pulses (slower), CALP adds 512
+// (faster); one pulse is 1e6 / 2^20 = 0.954 ppm. CALR is in the backup domain, so it survives resets
+static bool rtc_cal_apply(int32_t tenths) {
+  uint32_t mag = (uint32_t)(tenths < 0 ? -tenths : tenths);
+  // pulses = ppm * 2^20 / 1e6 = tenths * 65536 / 625000, rounded; fits 32 bits for |tenths| <= 4800
+  uint32_t pulses = (mag * 65536U + 312500U) / 625000U;
+  uint32_t plus = RTC_SMOOTHCALIB_PLUSPULSES_RESET, minus = pulses;
+
+  if (tenths < 0 && pulses > 0) {   // runs slow: add 512 pulses and mask all but the shortfall
+    plus = RTC_SMOOTHCALIB_PLUSPULSES_SET;
+    minus = 512U - pulses;
+  }
+  if (!rtc_ok || minus > RTC_CALR_CALM_Msk) {
+    return false;
+  }
+  if ((RTC->CALR & (RTC_CALR_CALP | RTC_CALR_CALW8 | RTC_CALR_CALW16 | RTC_CALR_CALM)) == (plus | minus)) {
+    return true;                    // already set (kept through the reset): skip the write
+  }
+  return HAL_RTCEx_SetSmoothCalib(&hrtc, RTC_SMOOTHCALIB_PERIOD_32SEC, plus, minus) == HAL_OK;
+}
+
+// "+51.8 ppm"
+static void rtc_cal_format(char *buf, size_t len) {
+  uint32_t mag = (uint32_t)(rtc_cal_tenths < 0 ? -rtc_cal_tenths : rtc_cal_tenths);
+
+  snprintf(buf, len, "%c%lu.%lu ppm", rtc_cal_tenths < 0 ? '-' : '+', mag / 10, mag % 10);
+}
+
+// apply the stored drift; erased (0xFFFFFFFF) reads as 0, no correction
+static void rtc_cal_load(void) {
+  uint32_t raw;
+  char cal[16];
+
+  if (!eep_ok || !eep_read_count(EEP_ADDR_RTC_CAL, &raw)) {
+    uart.println("rtc: cal unread, CALR left as is");
+    return;
+  }
+  rtc_cal_tenths = (int32_t)raw;
+  if (rtc_cal_tenths > RTC_CAL_MAX_TENTHS || rtc_cal_tenths < -RTC_CAL_MAX_TENTHS) {
+    uart.printf("rtc: cal %ld out of range, ignored\r\n", rtc_cal_tenths);
+    rtc_cal_tenths = 0;
+  }
+  rtc_cal_format(cal, sizeof(cal));
+  uart.printf("rtc: cal %s%s\r\n", cal, rtc_cal_apply(rtc_cal_tenths) ? "" : ", CALR write failed");
 }
 
 // INITS sets once a date is written and clears on backup domain reset (power loss)
@@ -843,6 +892,9 @@ void setup() {
   uart.println(acc_ok ? "acc: ok" : "acc: init failed");
   eep_ok = eep_init();
   uart.println(eep_ok ? "eep: ok" : "eep: FAIL");
+  if (rtc_ok) {
+    rtc_cal_load();
+  }
 
   attachInterrupt(digitalPinToInterrupt(BTN_PIN), btn_isr, FALLING);
   HAL_NVIC_SetPriority(RTC_TAMP_IRQn, 3, 0);
@@ -928,8 +980,64 @@ static void unit_set(const char *s) {
   uart.printf("unit: set %s\r\n", unit);
 }
 
+// "51.8", "-3", "+12.5" to 0.1 ppm units; at most one decimal
+static bool tenths_parse(const char *s, int32_t *out) {
+  bool neg = (*s == '-');
+  int32_t v = 0;
+  int8_t frac = -1;                 // -1 no point yet, 0 point seen, 1 one decimal read
+
+  if (*s == '+' || *s == '-') {
+    s++;
+  }
+  if (*s < '0' || *s > '9') {
+    return false;
+  }
+  for (; *s; s++) {
+    if (*s == '.' && frac < 0) {
+      frac = 0;
+      continue;
+    }
+    if (*s < '0' || *s > '9' || frac > 0 || v > 100000) {
+      return false;
+    }
+    v = v * 10 + (*s - '0');
+    if (frac == 0) {
+      frac = 1;
+    }
+  }
+  if (frac < 1) {
+    v *= 10;
+  }
+  *out = neg ? -v : v;
+  return true;
+}
+
+// C<ppm>: the drift measured with no correction, + if the clock runs fast; C0 clears.
+// Re-measuring with a correction in place gives the residual: send the old value plus the residual
+static void rtc_cal_set(const char *s) {
+  int32_t t;
+  char cal[16];
+
+  if (!tenths_parse(s, &t) || t > RTC_CAL_MAX_TENTHS || t < -RTC_CAL_MAX_TENTHS) {
+    uart.printf("rtc: bad cal '%s', send C<ppm> within +-480.0, + = runs fast\r\n", s);
+    return;
+  }
+  if (!rtc_cal_apply(t)) {
+    uart.println("rtc: cal CALR write failed");
+    return;
+  }
+  rtc_cal_tenths = t;
+  rtc_cal_format(cal, sizeof(cal));
+  if (!eep_ok || !eep_write_count(EEP_ADDR_RTC_CAL, (uint32_t)t)) {
+    uart.printf("rtc: cal %s applied, EEPROM write failed (lost when the cell is pulled)\r\n", cal);
+    return;
+  }
+  uart.printf("rtc: cal %s\r\n", cal);
+}
+
 // line commands on UART RX; returns true if a line arrived
 //   T<YYYYMMDD-HH:MM:SS>  set the clock
+//   C<ppm>                store and apply the RTC drift correction, + = runs fast, e.g. C51.8
 //   U<number>             set the unit number, 0..4294967294
 //   ERASE                 erase the whole EEPROM once the button is pressed to accept
 static bool rx_service(void) {
@@ -959,6 +1067,8 @@ static bool rx_service(void) {
       uart.printf("eep: press the button within %u s to erase all 64 KB\r\n", EEP_ERASE_CONFIRM_MS / 1000);
     } else if (line[0] == 'U') {
       unit_set(line + 1);
+    } else if (line[0] == 'C') {
+      rtc_cal_set(line + 1);
     } else if (line[0] == 'T' && rtc_set(line + 1) && rtc_format(ts, sizeof(ts))) {
       rtc_now_s(&sm_since_s);     // so a session in progress doesn't jump by the correction
       uart.printf("rtc: set %s\r\n", ts);

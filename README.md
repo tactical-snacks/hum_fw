@@ -43,6 +43,20 @@ This project was written with the help of AI (Claude Code). The frequency bracke
 
 # Changelog
 
+## [Unreleased]
+
+### Size
+
+| | Used | Total | |
+|---|---:|---:|---:|
+| Flash | 47,764 B | 64 KB | 73% |
+| RAM | 2,932 B | 12 KB | 24% |
+
+### Added
+
+- RTC calibration: `C<ppm>` stores the measured drift in the EEPROM and corrects it with the RTC's smooth calibration, reapplied at boot ([tools.md](tools/tools.md#rtc-calibration)); unit 1 measured +51.8 ppm
+- [send.py](tools/tools.md#sendpy): send one command and print the reply
+
 ## [0.1.0] - 2026-11-10
 
 ### Size

@@ -57,6 +57,19 @@ You can also set the clock by hand from any serial terminal by typing the same c
 
 Type `U` and the number followed by Enter in a serial terminal while the board is awake, e.g. `U1001`. The board stores it in the EEPROM, reads it back and replies `unit: set 1001`. Numbers run from 0 to 4294967294. The unit number prints at boot (`unit: 1001`, or `unit: unset, send U<number>` when blank) and in every status line after the timestamp.
 
+## RTC calibration
+
+The 32.768 kHz crystal sets how fast the clock runs. To correct a board that gains or loses time, measure its drift and send it with `C<ppm>`: positive if the clock runs fast, at most one decimal place, within ±480.0. For example, `C51.8` for a clock that gains 4.5 s a day. The board applies the correction through the RTC's smooth calibration (steps of 0.954 ppm), stores it in the EEPROM, and replies `rtc: cal +51.8 ppm`. It prints the value at boot (`rtc: cal +51.8 ppm`) and reapplies it. `C0` removes the correction.
+
+Each crystal is different, so measure every unit:
+
+1. Send `C0` if the unit has a correction, then set the clock with `set_rtc.py`.
+2. Straight away, run `serial_capture.py 120 --stamp` and press the button 5 or 6 times at uneven intervals.
+3. Leave the unit for 48 hours or more, then repeat step 2.
+4. Each status line bounds the offset: the board is between (board time − PC time) and that plus 1 s ahead. Take the largest lower bound and the smallest upper bound from each capture. The drift in ppm is (end offset − start offset) / elapsed seconds × 1,000,000.
+
+Measuring with a correction in place gives what's left over: send the old value plus that residual. `ERASE` clears the stored value; the correction then lasts until the next boot.
+
 ## Erasing the EEPROM
 
 Type `ERASE` followed by Enter in a serial terminal while the board is awake. The board replies `eep: press the button within 10 s to erase all 64 KB`; press the button to accept. It writes every byte back to 0xFF and reads each page back, which takes about 5.4 s, then prints `eep: erased in … ms`. With no press in 10 s it prints `eep: erase cancelled, no button press` and nothing changes.
@@ -72,6 +85,16 @@ Records a serial port for a fixed time and prints what it receives.
 ```
 
 The argument is the capture time in seconds. `--stamp` prefixes each line with the PC time it arrived, to the millisecond (`[PC 20261110-10:30:51.123] ...`), for checking RTC drift against the PC clock.
+
+## send.py
+
+Sends one command line to the board and prints the reply, so commands like `C51.8` or `U1001` don't need a serial terminal. Press the board's button first so it's awake.
+
+```
+~/.platformio/penv/Scripts/python.exe -I tools/send.py C51.8
+```
+
+`--wait` sets how long to print replies for (default 1 s).
 
 ## lse_drive_timing.tcl
 
