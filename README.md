@@ -25,6 +25,7 @@ Hour Utilization Monitor: a coin-cell data logger that timestamps machine run ti
 - [Engine frequency brackets](docs/hum_engine_freq.md): idle, operating, and off bands for run detection
 - [State machine](docs/state_machine.md): sleep, duration tracking and EEPROM writes for each state change
 - [RTC wake HardFault](docs/rtc_wake_hardfault.md): `DBG_STOP` left set after flashing faults the first RTC timer wake; workaround and planned fix
+- [Power budget](docs/power_budget.md): conservative sleep, wake and battery-life estimate; traps that drain a cell in days
 - [Engine recordings](docs/recording.zip): WAV clips of cranking, cold idle, transition, and high RPM
 - [Bench tools](tools/tools.md): setting the RTC, serial capture, crystal startup test
 
