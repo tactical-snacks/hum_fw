@@ -57,6 +57,7 @@ This project was written with the help of AI (Claude Code). The frequency bracke
 
 - RTC calibration: `C<ppm>` stores the measured drift in the EEPROM and corrects it with the RTC's smooth calibration, reapplied at boot ([tools.md](tools/tools.md#rtc-calibration)); unit 1 measured +51.8 ppm
 - [send.py](tools/tools.md#sendpy): send one command and print the reply
+- [Power budget](docs/power_budget.md): conservative estimate of sleep current, charge per wake and battery life; flags the clock-unset, `DBG_EN` and vibration-while-off drains
 
 ## [0.1.0] - 2026-11-10
 
