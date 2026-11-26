@@ -44,7 +44,7 @@ This project was written with the help of AI (Claude Code). The frequency bracke
 
 # Changelog
 
-## [Unreleased]
+## [0.2.0] - 2026-11-25
 
 ### Size
 
